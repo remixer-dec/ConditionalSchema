@@ -1,0 +1,1050 @@
+"""
+Conditional Pydantic Schema Library with Dynamic Templates
+"""
+
+from __future__ import annotations
+
+import itertools
+from typing import (
+  Any,
+  Callable,
+  Dict,
+  FrozenSet,
+  List,
+  Literal,
+  Optional,
+  Sequence,
+  Set,
+  Tuple,
+  Type,
+  Union,
+  get_args,
+  get_origin,
+  overload,
+)
+
+from pydantic import BaseModel, Field, create_model
+from pydantic.fields import FieldInfo
+
+CYesNo = Literal["yes", "no"]
+
+
+class AnyOf:
+  """Represents a condition that matches if the value is any of the given options."""
+
+  __slots__ = ("_values", "_frozen_values")
+
+  def __init__(self, *values: Any):
+    self._values = tuple(values)  # Use tuple for immutability
+    # Pre-compute frozen set for O(1) lookups
+    self._frozen_values: FrozenSet[Any] = frozenset(values)
+
+  def evaluate(self, actual: Any) -> bool:
+    return actual in self._frozen_values
+
+  def get_values(self) -> Tuple[Any, ...]:
+    return self._values
+
+  def __repr__(self) -> str:
+    return f"AnyOf({', '.join(repr(v) for v in self._values)})"
+
+
+class NoneOf:
+  """Represents a condition that matches if the value is NONE of the given options."""
+
+  __slots__ = ("_values", "_frozen_values")
+
+  def __init__(self, *values: Any):
+    self._values = tuple(values)
+    self._frozen_values: FrozenSet[Any] = frozenset(values)
+
+  def evaluate(self, actual: Any) -> bool:
+    return actual not in self._frozen_values
+
+  def get_values(self) -> Tuple[Any, ...]:
+    return self._values
+
+  def __repr__(self) -> str:
+    return f"NoneOf({', '.join(repr(v) for v in self._values)})"
+
+
+def any_of(*values: Any) -> AnyOf:
+  """Create a condition that matches if the value is any of the given options."""
+  return AnyOf(*values)
+
+
+def none_of(*values: Any) -> NoneOf:
+  """Create a condition that matches if the value is none of the given options."""
+  return NoneOf(*values)
+
+
+def truthy(val: Any) -> bool:
+  """Check if a value is truthy."""
+  return bool(val)
+
+
+class Template:
+  """Represents a template value that can be resolved with context."""
+
+  __slots__ = ("value",)
+
+  def __init__(self, value: Union[str, Callable[[Dict], Any]]):
+    self.value = value
+
+  def resolve(self, ctx: Dict[str, Any]) -> Any:
+    if callable(self.value):
+      return self.value(ctx)
+    elif isinstance(self.value, str) and "{" in self.value:
+      return self.value.format(**ctx)
+    return self.value
+
+  def __repr__(self) -> str:
+    return f"Template({self.value!r})"
+
+
+def Ctemplate(value: Union[str, Callable[[Dict], Any]]) -> Template:
+  """Create a template for dynamic value resolution."""
+  return Template(value)
+
+
+class LiteralTemplate:
+  """
+  Template for creating state-dependent Literal types.
+
+  Supports two modes:
+  1. Mapping mode: Maps bind-time context values to different Literal options
+  2. Conditional mode: Uses a lambda to select between two option lists
+
+  Examples:
+      # Mapping mode
+      action: str = CField(
+          Cliteral("mode", {
+              "create": ["save", "cancel"],
+              "edit": ["save", "delete", "cancel"],
+          }),
+          when_bound=["mode"]
+      )
+
+      # Conditional mode with lambda
+      location_type: str = CField(
+          Cliteral("location", lambda loc: len(loc) > 10,
+                   if_true=["Long location"],
+                   if_false=["Short location"]),
+          when_truthy=["location"]
+      )
+  """
+
+  __slots__ = ("key", "mapping", "default", "condition", "if_true", "if_false")
+
+  def __init__(
+    self,
+    key: str,
+    mapping_or_condition: Union[Dict[Any, List[Any]], Callable[[Any], bool]],
+    default_or_if_true: Optional[List[Any]] = None,
+    if_false: Optional[List[Any]] = None,
+  ):
+    self.key = key
+
+    if callable(mapping_or_condition) and not isinstance(mapping_or_condition, dict):
+      # Conditional mode: lambda, if_true, if_false
+      self.mapping = None
+      self.default = None
+      self.condition = mapping_or_condition
+      self.if_true = default_or_if_true
+      self.if_false = if_false
+    else:
+      # Mapping mode: dict, default
+      self.mapping = mapping_or_condition
+      self.default = default_or_if_true
+      self.condition = None
+      self.if_true = None
+      self.if_false = None
+
+  def resolve(self, ctx: Dict[str, Any]) -> Type:
+    """Resolve to a Literal type based on context."""
+    value = ctx.get(self.key)
+
+    if self.condition is not None:
+      # Conditional mode
+      if self.condition(value):
+        options = self.if_true
+      else:
+        options = self.if_false
+
+      if options is None:
+        raise ValueError(f"Cliteral condition returned {self.condition(value)}, but corresponding options list is None")
+    else:
+      # Mapping mode
+      options = self.mapping.get(value, self.default)
+
+      if options is None:
+        raise ValueError(
+          f"No Literal options defined for {self.key}={value!r} "
+          f"and no default provided. Available keys: {list(self.mapping.keys())}"
+        )
+
+    if not options:
+      raise ValueError(f"Empty options list for {self.key}={value!r}")
+
+    # Resolve any template placeholders in the literal values
+    resolved_options = []
+    for opt in options:
+      if isinstance(opt, str) and "{" in opt:
+        resolved_options.append(opt.format(**ctx))
+      else:
+        resolved_options.append(opt)
+
+    return Literal[tuple(resolved_options)]
+
+  def __repr__(self) -> str:
+    if self.condition is not None:
+      return f"Cliteral({self.key!r}, <condition>, if_true={self.if_true!r}, if_false={self.if_false!r})"
+    return f"Cliteral({self.key!r}, {self.mapping!r})"
+
+
+@overload
+def Cliteral(key: str, mapping: Dict[Any, List[Any]], default: Optional[List[Any]] = None) -> LiteralTemplate: ...
+
+
+@overload
+def Cliteral(
+  key: str,
+  condition: Callable[[Any], bool],
+  if_true: List[Any],
+  if_false: List[Any],
+) -> LiteralTemplate: ...
+
+
+def Cliteral(
+  key: str,
+  mapping_or_condition: Union[Dict[Any, List[Any]], Callable[[Any], bool]],
+  default_or_if_true: Optional[List[Any]] = None,
+  if_false: Optional[List[Any]] = None,
+  if_true: Optional[List[Any]] = None,
+) -> LiteralTemplate:
+  """
+  Create a state-dependent Literal type.
+
+  Two modes:
+
+  1. Mapping mode - map context values to literal options:
+      Cliteral(key, {value1: [options], value2: [options]}, default=[options])
+
+  2. Conditional mode - use lambda to choose between two option lists:
+      Cliteral(key, lambda val: condition, if_true=[options], if_false=[options])
+
+  Literal values can contain {placeholder} templates that are resolved at bind time.
+
+  Examples:
+      # Mapping mode
+      action: str = CField(
+          Cliteral("mode", {
+              "create": ["save", "cancel"],
+              "edit": ["save", "delete", "cancel"],
+          }),
+          when_truthy=["mode"]
+      )
+
+      # Conditional mode
+      location_desc: str = CField(
+          Cliteral("location",
+                   lambda loc: len(loc) > 10,
+                   if_true=["Long location"],
+                   if_false=["Short location"]),
+          when_truthy=["location"]
+      )
+
+      # With template placeholders in literal values
+      guide: str = CField(
+          Cliteral("mode", {
+              "chat": ["I will answer in {language} as {char_name}."],
+              "formal": ["Responding formally in {language}."],
+          }),
+          when_truthy=["mode"]
+      )
+      # bind(mode="chat", language="English", char_name="Claude")
+      # -> Literal["I will answer in English as Claude."]
+  """
+  return LiteralTemplate(key, mapping_or_condition, default_or_if_true, if_false)
+
+
+
+class _TruthyCheck:
+  """Sentinel class to indicate a truthy check condition."""
+
+  __slots__ = ()
+
+  def __call__(self, val: Any) -> bool:
+    return bool(val)
+
+  def __repr__(self) -> str:
+    return "TRUTHY"
+
+
+class _FalsyCheck:
+  """Sentinel class to indicate a falsy check condition."""
+
+  __slots__ = ()
+
+  def __call__(self, val: Any) -> bool:
+    return not bool(val)
+
+  def __repr__(self) -> str:
+    return "FALSY"
+
+
+class _UnboundCheck:
+  """Sentinel to check if a key is NOT present in context."""
+
+  __slots__ = ("_marker",)
+
+  def __init__(self):
+    self._marker = object()
+
+  def check(self, ctx: Dict[str, Any], key: str) -> bool:
+    return ctx.get(key, self._marker) is self._marker
+
+  def __repr__(self) -> str:
+    return "UNBOUND"
+
+
+TRUTHY = _TruthyCheck()
+FALSY = _FalsyCheck()
+UNBOUND = _UnboundCheck()
+
+
+class ConditionalFieldInfo:
+  """
+  Holds information about a conditional field.
+
+  Attributes:
+      field_type: The type of the field (can be LiteralTemplate for dynamic Literals)
+      when: Dict mapping field names to required values for this field to be active
+      when_any: List of condition dicts - field is active if ANY condition matches
+      when_bound: Conditions checked at bind time (dict or list for truthy checks)
+      when_truthy: List of context keys that must be truthy for field to be active
+      when_falsy: List of context keys that must be falsy for field to be active
+      when_unbound: List of context keys that must NOT be present for field to be active
+      default: Default value when field is active
+      alias: Field alias for JSON serialization
+      description: Field description
+      pattern: Regex pattern for validation
+      enum: Enum values for validation
+  """
+
+  __slots__ = (
+    "field_type",
+    "when",
+    "when_any",
+    "when_bound",
+    "when_truthy",
+    "when_falsy",
+    "when_unbound",
+    "default",
+    "alias",
+    "description",
+    "pattern",
+    "enum",
+    "field_kwargs",
+    "bound_active_result",
+    "_dependency_fields_cache",
+  )
+
+  def __init__(
+    self,
+    field_type: Union[Type, LiteralTemplate] = None,
+    when: Optional[Dict[str, Any]] = None,
+    when_any: Optional[List[Dict[str, Any]]] = None,
+    when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
+    when_truthy: Optional[List[str]] = None,
+    when_falsy: Optional[List[str]] = None,
+    when_unbound: Optional[List[str]] = None,
+    default: Any = ...,
+    alias: Optional[str] = None,
+    description: Optional[Union[str, Template]] = None,
+    pattern: Optional[Union[str, Template]] = None,
+    enum: Optional[Union[List, Template]] = None,
+    **field_kwargs: Any,
+  ):
+    self.field_type = field_type
+    self.when = when or {}
+    self.when_any = when_any
+    self.default = default
+    self.alias = alias
+    self.description = description
+    self.pattern = pattern
+    self.enum = enum
+    self.field_kwargs = field_kwargs
+    self.bound_active_result = True
+    self._dependency_fields_cache: Optional[FrozenSet[str]] = None
+
+    # Initialize condition lists
+    self.when_truthy: List[str] = list(when_truthy) if when_truthy else []
+    self.when_falsy: List[str] = list(when_falsy) if when_falsy else []
+    self.when_unbound: List[str] = list(when_unbound) if when_unbound else []
+
+    # Process when_bound - support both dict and list formats
+    self.when_bound: Dict[str, Any] = {}
+
+    if when_bound is not None:
+      if isinstance(when_bound, (list, tuple)):
+        # List format: treat each item as a truthy check
+        self.when_truthy.extend(when_bound)
+      elif isinstance(when_bound, dict):
+        self.when_bound = dict(when_bound)
+      else:
+        raise TypeError(f"when_bound must be a dict or list, got {type(when_bound).__name__}")
+
+  @property
+  def dependency_fields(self) -> FrozenSet[str]:
+    """Get the set of field names this field depends on (for runtime conditions)."""
+    if self._dependency_fields_cache is None:
+      deps: Set[str] = set(self.when.keys())
+      if self.when_any:
+        for cond_set in self.when_any:
+          deps.update(cond_set.keys())
+      self._dependency_fields_cache = frozenset(deps)
+    return self._dependency_fields_cache
+
+  def evaluate(self, combo: Dict[str, Any]) -> bool:
+    """Evaluate if the field should be active for a given combination of control values."""
+    # Check 'when' conditions (all must match)
+    for field_name, condition in self.when.items():
+      if field_name not in combo:
+        continue
+      actual = combo[field_name]
+      if isinstance(condition, AnyOf):
+        if not condition.evaluate(actual):
+          return False
+      elif isinstance(condition, NoneOf):
+        if not condition.evaluate(actual):
+          return False
+      elif actual != condition:
+        return False
+
+    # Check 'when_any' conditions (at least one set must match)
+    if self.when_any:
+      any_matched = False
+      for condition_set in self.when_any:
+        all_in_set_match = True
+        for field_name, condition in condition_set.items():
+          if field_name not in combo:
+            continue
+          actual = combo[field_name]
+          if isinstance(condition, AnyOf):
+            if not condition.evaluate(actual):
+              all_in_set_match = False
+              break
+          elif isinstance(condition, NoneOf):
+            if not condition.evaluate(actual):
+              all_in_set_match = False
+              break
+          elif actual != condition:
+            all_in_set_match = False
+            break
+        if all_in_set_match:
+          any_matched = True
+          break
+      if not any_matched:
+        return False
+
+    return True
+
+  def evaluate_bound(self, ctx: Dict[str, Any]) -> bool:
+    """Evaluate bind-time conditions."""
+    # Check unbound conditions (keys must NOT be in context)
+    _marker = object()
+    for key in self.when_unbound:
+      if ctx.get(key, _marker) is not _marker:
+        return False
+
+    # Check truthy conditions
+    for key in self.when_truthy:
+      if not bool(ctx.get(key)):
+        return False
+
+    # Check falsy conditions
+    for key in self.when_falsy:
+      if bool(ctx.get(key)):
+        return False
+
+    # Check dict-based conditions
+    for key, condition in self.when_bound.items():
+      actual = ctx.get(key)
+      if isinstance(condition, AnyOf):
+        if not condition.evaluate(actual):
+          return False
+      elif isinstance(condition, NoneOf):
+        if not condition.evaluate(actual):
+          return False
+      elif callable(condition):
+        if not condition(actual):
+          return False
+      elif actual != condition:
+        return False
+
+    return True
+
+  @property
+  def requires_bind(self) -> bool:
+    """Check if this field requires bind() to be called."""
+    return bool(
+      self.when_truthy
+      or self.when_falsy
+      or self.when_unbound
+      or self.when_bound
+      or isinstance(self.field_type, LiteralTemplate)
+      or isinstance(self.pattern, Template)
+      or isinstance(self.enum, Template)
+      or isinstance(self.description, Template)
+      or (get_origin(self.field_type) is Literal and any(isinstance(a, str) and "{" in a for a in get_args(self.field_type)))
+    )
+
+  def resolve_templates(self, ctx: Dict[str, Any]) -> "ConditionalFieldInfo":
+    """Resolve all template values with the given context."""
+
+    def resolve(val: Any) -> Any:
+      if isinstance(val, Template):
+        return val.resolve(ctx)
+      return val
+
+    # Resolve field type
+    resolved_type = self.field_type
+
+    if isinstance(self.field_type, LiteralTemplate):
+      # Resolve LiteralTemplate to actual Literal type
+      resolved_type = self.field_type.resolve(ctx)
+    elif get_origin(self.field_type) is Literal:
+      # Resolve string templates in Literal args
+      args = get_args(self.field_type)
+      new_args = []
+      for arg in args:
+        if isinstance(arg, str) and "{" in arg:
+          new_args.append(arg.format(**ctx))
+        else:
+          new_args.append(arg)
+      resolved_type = Literal[tuple(new_args)]
+
+    bound_active = self.evaluate_bound(ctx)
+
+    result = ConditionalFieldInfo(
+      field_type=resolved_type,
+      when=self.when,
+      when_any=self.when_any,
+      when_bound={},  # Already evaluated
+      when_truthy=[],  # Already evaluated
+      when_falsy=[],  # Already evaluated
+      when_unbound=[],  # Already evaluated
+      default=self.default,
+      alias=self.alias,
+      description=resolve(self.description),
+      pattern=resolve(self.pattern),
+      enum=resolve(self.enum),
+      **self.field_kwargs,
+    )
+    result.bound_active_result = bound_active
+    return result
+
+  def make_field_info(self) -> Tuple[Type, FieldInfo]:
+    """Create Pydantic field info for an active field."""
+    extra = dict(self.field_kwargs)
+
+    if self.pattern:
+      extra["pattern"] = self.pattern
+    if self.enum:
+      extra["json_schema_extra"] = {"enum": self.enum}
+
+    return (
+      self.field_type,
+      Field(
+        default=self.default,
+        alias=self.alias,
+        description=self.description,
+        **extra,
+      ),
+    )
+
+
+@overload
+def CField(
+  field_type: Union[Type, LiteralTemplate],
+  *,
+  when: Optional[Dict[str, Any]] = None,
+  when_any: Optional[List[Dict[str, Any]]] = None,
+  when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
+  when_truthy: Optional[List[str]] = None,
+  when_falsy: Optional[List[str]] = None,
+  when_unbound: Optional[List[str]] = None,
+  default: Any = ...,
+  alias: Optional[str] = None,
+  description: Optional[Union[str, Template]] = None,
+  pattern: Optional[Union[str, Template]] = None,
+  enum: Optional[Union[List, Template]] = None,
+  **field_kwargs: Any,
+) -> Any: ...
+
+
+@overload
+def CField(
+  *,
+  when: Optional[Dict[str, Any]] = None,
+  when_any: Optional[List[Dict[str, Any]]] = None,
+  when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
+  when_truthy: Optional[List[str]] = None,
+  when_falsy: Optional[List[str]] = None,
+  when_unbound: Optional[List[str]] = None,
+  default: Any = ...,
+  alias: Optional[str] = None,
+  description: Optional[Union[str, Template]] = None,
+  pattern: Optional[Union[str, Template]] = None,
+  enum: Optional[Union[List, Template]] = None,
+  **field_kwargs: Any,
+) -> Any: ...
+
+
+def CField(
+  field_type: Union[Type, LiteralTemplate] = None,
+  *,
+  when: Optional[Dict[str, Any]] = None,
+  when_any: Optional[List[Dict[str, Any]]] = None,
+  when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
+  when_truthy: Optional[List[str]] = None,
+  when_falsy: Optional[List[str]] = None,
+  when_unbound: Optional[List[str]] = None,
+  default: Any = ...,
+  alias: Optional[str] = None,
+  description: Optional[Union[str, Template]] = None,
+  pattern: Optional[Union[str, Template]] = None,
+  enum: Optional[Union[List, Template]] = None,
+  **field_kwargs: Any,
+) -> Any:
+  """
+  Create a conditional field.
+
+  Args:
+      field_type: The type of the field. Can be:
+          - Regular type (str, int, etc.)
+          - Literal["a", "b"]
+          - Cliteral("key", {...}) for state-dependent Literals
+      when: Dict of runtime field conditions (all must match).
+            Keys are Python field NAMES (not aliases).
+      when_any: List of condition dicts - field active if ANY matches.
+                Keys are Python field NAMES (not aliases).
+      when_bound: Bind-time conditions. Can be:
+          - Dict[str, Any]: {key: condition} where condition is value, callable, or AnyOf
+          - List[str]: List of context keys that must be truthy
+      when_truthy: List of context keys that must be truthy
+      when_falsy: List of context keys that must be falsy
+      when_unbound: List of context keys that must NOT be in bind context
+      default: Default value
+      alias: JSON alias for serialization. When json_schema(by_alias=True) is called,
+             this alias will be used in the schema instead of the field name.
+             Conditions (when, when_any) always use field NAMES, not aliases.
+      description: Field description (can be Template)
+      pattern: Regex pattern (can be Template)
+      enum: Enum values (can be Template)
+      **field_kwargs: Additional Pydantic Field kwargs
+
+  Returns:
+      ConditionalFieldInfo instance
+
+  Examples:
+      # Simple condition - uses field NAME 'enabled', not alias
+      name: str = CField(when={"enabled": True})
+
+      # With alias - condition uses 'has_pet' (name), schema can use 'hasPet' (alias)
+      class Form(ConditionalModel):
+          has_pet: CYesNo = CField(alias="hasPet")
+          pet_name: str = CField(
+              alias="petName",
+              when={"has_pet": "yes"}  # Uses field NAME, not alias
+          )
+
+      # Default schema uses field names
+      Form.json_schema()
+      # {"properties": {"has_pet": ..., "pet_name": ...}}
+
+      # by_alias=True uses aliases
+      Form.json_schema(by_alias=True)
+      # {"properties": {"hasPet": ..., "petName": ...}}
+
+      # Truthy bind-time check
+      city: str = CField(when_bound=["location"])
+
+      # Falsy bind-time check
+      placeholder: str = CField(when_falsy=["has_value"])
+
+      # Unbound check (field active when key is NOT in context)
+      default_mode: str = CField(when_unbound=["mode"])
+
+      # State-dependent Literal
+      action: str = CField(
+          Cliteral("mode", {
+              "create": ["save", "cancel"],
+              "edit": ["save", "delete", "cancel"],
+          }),
+          when_truthy=["mode"]
+      )
+  """
+  return ConditionalFieldInfo(
+    field_type=field_type,
+    when=when,
+    when_any=when_any,
+    when_bound=when_bound,
+    when_truthy=when_truthy,
+    when_falsy=when_falsy,
+    when_unbound=when_unbound,
+    default=default,
+    alias=alias,
+    description=description,
+    pattern=pattern,
+    enum=enum,
+    **field_kwargs,
+  )
+
+
+
+def _has_template_in_type(field_type: Any) -> bool:
+  """Check if a type annotation contains template placeholders."""
+  if isinstance(field_type, LiteralTemplate):
+    return True
+  if get_origin(field_type) is Literal:
+    return any(isinstance(a, str) and "{" in a for a in get_args(field_type))
+  return False
+
+
+def _get_control_values(
+  control_fields: FrozenSet[str],
+  annotations: Dict[str, Type],
+  conditional_fields: Dict[str, ConditionalFieldInfo],
+) -> Dict[str, Tuple[Any, ...]]:
+  """
+  Determine possible values for each control field.
+  Uses tuples for memory efficiency and hashability.
+  """
+  control_values: Dict[str, Tuple[Any, ...]] = {}
+
+  for cf_name in control_fields:
+    if cf_name in annotations:
+      ann = annotations[cf_name]
+      origin = get_origin(ann)
+      if origin is Literal:
+        control_values[cf_name] = get_args(ann)
+      elif ann is bool:
+        control_values[cf_name] = (True, False)
+      else:
+        # Collect possible values from conditions
+        possible: Set[Any] = set()
+        for cond_info in conditional_fields.values():
+          if cf_name in cond_info.when:
+            c = cond_info.when[cf_name]
+            if isinstance(c, AnyOf):
+              possible.update(c.get_values())
+            elif isinstance(c, NoneOf):
+              # For NoneOf, we need all values except these
+              pass  # Can't determine without full domain
+            else:
+              possible.add(c)
+        control_values[cf_name] = tuple(possible) if possible else (True, False)
+
+  return control_values
+
+
+def _generate_combos(
+  control_fields: Sequence[str],
+  control_values: Dict[str, Tuple[Any, ...]],
+) -> List[Dict[str, Any]]:
+  """Generate all combinations of control field values using itertools.product."""
+  if not control_fields:
+    return [{}]
+
+  value_lists = [control_values.get(f, (None,)) for f in control_fields]
+  combos = []
+
+  for values in itertools.product(*value_lists):
+    combo = dict(zip(control_fields, values))
+    combos.append(combo)
+
+  return combos
+
+
+class ConditionalModelMeta(type(BaseModel)):
+  """Metaclass for ConditionalModel that handles variant generation."""
+
+  def __new__(mcs, name: str, bases: Tuple[type, ...], namespace: Dict[str, Any], **kwargs):
+    # Skip processing for base class and bound classes
+    if name == "ConditionalModel" or name.endswith("_Bound"):
+      return super().__new__(mcs, name, bases, namespace, **kwargs)
+
+    # Remove private attributes that Pydantic adds
+    from pydantic.fields import ModelPrivateAttr
+
+    for key in list(namespace.keys()):
+      if isinstance(namespace[key], ModelPrivateAttr):
+        del namespace[key]
+
+    conditional_fields: Dict[str, ConditionalFieldInfo] = {}
+    regular_fields: Dict[str, Tuple[Type, Any]] = {}
+    annotations = namespace.get("__annotations__", {})
+
+    # Separate conditional fields from regular fields
+    for field_name, field_value in list(namespace.items()):
+      if isinstance(field_value, ConditionalFieldInfo):
+        if field_value.field_type is None:
+          field_value.field_type = annotations.get(field_name, Any)
+        conditional_fields[field_name] = field_value
+        del namespace[field_name]
+      elif field_name in annotations and not field_name.startswith("_"):
+        if isinstance(field_value, FieldInfo):
+          regular_fields[field_name] = (annotations[field_name], field_value)
+        elif field_value is not ...:
+          regular_fields[field_name] = (annotations[field_name], field_value)
+        else:
+          regular_fields[field_name] = (annotations[field_name], ...)
+
+    # Check if binding is required
+    needs_bind = any(cf.requires_bind for cf in conditional_fields.values())
+
+    # Generate variants now if no binding is needed
+    if not needs_bind:
+      variants = mcs._generate_variants(name, regular_fields, conditional_fields, annotations)
+    else:
+      variants = []
+
+    # Create the class
+    cls = super().__new__(mcs, name, bases, namespace, **kwargs)
+
+    # Attach metadata
+    type.__setattr__(cls, "__cfields__", conditional_fields)
+    type.__setattr__(cls, "__rfields__", regular_fields)
+    type.__setattr__(cls, "__annots__", annotations)
+    type.__setattr__(cls, "__needs_bind__", needs_bind)
+    type.__setattr__(cls, "__variants__", variants)
+
+    return cls
+
+  @staticmethod
+  def _generate_variants(
+    name: str,
+    regular_fields: Dict[str, Tuple[Type, Any]],
+    conditional_fields: Dict[str, ConditionalFieldInfo],
+    annotations: Dict[str, Type],
+  ) -> List[Type[BaseModel]]:
+    """Generate all variant models based on control field combinations."""
+
+    # Collect all control fields (fields that affect conditional logic)
+    control_fields: Set[str] = set()
+    for cf in conditional_fields.values():
+      control_fields.update(cf.dependency_fields)
+
+    control_fields_frozen = frozenset(control_fields)
+
+    # Get possible values for each control field
+    control_values = _get_control_values(control_fields_frozen, annotations, conditional_fields)
+
+    # Generate all combinations
+    combos = _generate_combos(list(control_fields), control_values)
+
+    variants = []
+    seen_signatures: Set[FrozenSet[str]] = set()
+
+    for combo in combos:
+      variant_fields = dict(regular_fields)
+      active_conditional_fields: Set[str] = set()
+
+      # Fix control field values in this variant
+      for cf_name, cf_val in combo.items():
+        if cf_name in annotations:
+          variant_fields[cf_name] = (Literal[cf_val], cf_val)
+
+      # Evaluate each conditional field
+      for field_name, cond_info in conditional_fields.items():
+        when_ok = cond_info.evaluate(combo)
+        bound_ok = cond_info.bound_active_result
+
+        active = when_ok and bound_ok
+
+        if active:
+          # Only add field when active, completely omit when inactive
+          ftype, finfo = cond_info.make_field_info()
+          variant_fields[field_name] = (ftype, finfo)
+          active_conditional_fields.add(field_name)
+        # When not active: field is NOT added at all (complete removal)
+
+      # Create signature to deduplicate equivalent variants
+      signature_parts = [f"{k}={v}" for k, v in sorted(combo.items())] + sorted(active_conditional_fields)
+      signature = frozenset(signature_parts)
+
+      # Skip duplicate variants
+      if signature in seen_signatures:
+        continue
+      seen_signatures.add(signature)
+
+      # Create variant name
+      suffix_parts = [str(v) for v in combo.values()] if combo else ["default"]
+      suffix = "_".join(suffix_parts)
+
+      variant = create_model(f"{name}_{suffix}", **variant_fields)
+      variants.append(variant)
+
+    return variants
+
+
+class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
+  """
+  Base class for models with conditional fields.
+
+  Conditional fields can be shown/hidden based on:
+  - Runtime values of other fields (generates anyOf variants)
+  - Bind-time context values (evaluated at .bind() call)
+
+  Example:
+      class MyForm(ConditionalModel):
+          has_pet: CYesNo
+          pet_name: str = CField(when={"has_pet": "yes"})
+
+      # Get JSON schema with anyOf variants
+      schema = MyForm.json_schema()
+
+      # With bind-time conditions
+      class LocationForm(ConditionalModel):
+          city: str = CField(when_bound=["location"])  # truthy check
+
+      BoundForm = LocationForm.bind(location="NYC")
+      schema = BoundForm.json_schema()
+  """
+
+  class Config:
+    populate_by_name = True
+
+  @classmethod
+  def bind(cls, **ctx: Any) -> Type["ConditionalModel"]:
+    """
+    Bind the model with context values.
+
+    This resolves:
+    - Template values in descriptions, patterns, enums
+    - LiteralTemplate types (Cliteral)
+    - when_bound conditions
+    - when_truthy conditions
+    - when_falsy conditions
+    - when_unbound conditions
+
+    Args:
+        **ctx: Context values for templates and bind-time conditions
+
+    Returns:
+        A new ConditionalModel subclass with resolved variants
+
+    Example:
+        class Form(ConditionalModel):
+            detail: str = CField(
+                when_truthy=["show_detail"],
+                description=Ctemplate("Details for {entity}")
+            )
+            action: str = CField(
+                Cliteral("mode", {
+                    "create": ["save", "cancel"],
+                    "edit": ["save", "delete", "cancel"],
+                }),
+                when_truthy=["mode"]
+            )
+
+        BoundForm = Form.bind(show_detail=True, entity="User", mode="edit")
+    """
+    cfields = cls.__cfields__
+    rfields = cls.__rfields__
+    annots = cls.__annots__
+
+    # Resolve templates and evaluate bound conditions
+    resolved = {name: cf.resolve_templates(ctx) for name, cf in cfields.items()}
+
+    # Generate variants with resolved fields
+    variants = ConditionalModelMeta._generate_variants(
+      cls.__name__,
+      rfields,
+      resolved,
+      annots,
+    )
+
+    # Create bound class
+    new_cls = type(f"{cls.__name__}_Bound", (ConditionalModel,), {})
+    type.__setattr__(new_cls, "__variants__", variants)
+    type.__setattr__(new_cls, "__cfields__", resolved)
+    type.__setattr__(new_cls, "__rfields__", rfields)
+    type.__setattr__(new_cls, "__annots__", annots)
+    type.__setattr__(new_cls, "__needs_bind__", False)
+
+    return new_cls
+
+  @classmethod
+  def get_variants(cls) -> List[Type[BaseModel]]:
+    """Get all generated variant models."""
+    return cls.__variants__
+
+  @classmethod
+  def as_union(cls) -> Type:
+    """Get the model as a Union type of all variants."""
+    variants = cls.get_variants()
+    if len(variants) == 1:
+      return variants[0]
+    return Union[tuple(variants)]
+
+  @classmethod
+  def json_schema(cls, by_alias: bool = False) -> Dict[str, Any]:
+    """
+    Get the JSON schema for this model.
+
+    If there are multiple variants, returns an anyOf schema.
+    If there's one variant, returns that variant's schema directly.
+
+    Args:
+        by_alias: If True, use field aliases in schema instead of field names.
+                 Falls back to field name if no alias is defined.
+
+    Raises:
+        ValueError: If the model has bind-time conditions and .bind()
+                   hasn't been called.
+
+    Example:
+        class Form(ConditionalModel):
+            user_name: str = CField(str, alias="userName")
+
+        # Default - uses field names
+        Form.json_schema()
+        # {"properties": {"user_name": {...}}}
+
+        # With by_alias - uses aliases
+        Form.json_schema(by_alias=True)
+        # {"properties": {"userName": {...}}}
+    """
+    if cls.__needs_bind__:
+      raise ValueError(
+        "Schema has bind-time conditions (when_bound, when_truthy, "
+        "when_falsy, when_unbound, templates, or Cliteral). "
+        "Call .bind() first to resolve them."
+      )
+    variants = cls.get_variants()
+    if len(variants) == 1:
+      return variants[0].model_json_schema(by_alias=by_alias)
+    return {"anyOf": [v.model_json_schema(by_alias=by_alias) for v in variants]}
+
+
+__all__ = [
+  "CYesNo",
+  "any_of",
+  "none_of",
+  "truthy",
+  "TRUTHY",
+  "FALSY",
+  "UNBOUND",
+  "Ctemplate",
+  "Cliteral",
+  "CField",
+  "ConditionalModel",
+  "Template",
+  "LiteralTemplate",
+  "AnyOf",
+  "NoneOf",
+  "ConditionalFieldInfo",
+]
