@@ -220,6 +220,7 @@ def Cliteral(
   mapping_or_condition: Union[Dict[Any, List[Any]], Callable[[Any], bool]],
   default_or_if_true: Optional[List[Any]] = None,
   if_false: Optional[List[Any]] = None,
+  *,
   if_true: Optional[List[Any]] = None,
 ) -> LiteralTemplate:
   """
@@ -265,7 +266,9 @@ def Cliteral(
       # bind(mode="chat", language="English", char_name="Claude")
       # -> Literal["I will answer in English as Claude."]
   """
-  return LiteralTemplate(key, mapping_or_condition, default_or_if_true, if_false)
+  # When if_true is passed as keyword, use it instead of default_or_if_true for conditional mode
+  actual_if_true = if_true if if_true is not None else default_or_if_true
+  return LiteralTemplate(key, mapping_or_condition, actual_if_true, if_false)
 
 
 
@@ -626,6 +629,7 @@ def CField(
           - Regular type (str, int, etc.)
           - Literal["a", "b"]
           - Cliteral("key", {...}) for state-dependent Literals
+          - None or ... to infer from annotation
       when: Dict of runtime field conditions (all must match).
             Keys are Python field NAMES (not aliases).
       when_any: List of condition dicts - field active if ANY matches.
@@ -668,6 +672,11 @@ def CField(
       Form.json_schema(by_alias=True)
       # {"properties": {"hasPet": ..., "petName": ...}}
 
+      # Template placeholders in Literal (type inferred from annotation)
+      guide: Literal["I will answer in {language}."] = CField(
+          when_truthy=["language"]
+      )
+
       # Truthy bind-time check
       city: str = CField(when_bound=["location"])
 
@@ -686,6 +695,10 @@ def CField(
           when_truthy=["mode"]
       )
   """
+  # Treat Ellipsis as None (infer from annotation)
+  if field_type is ...:
+    field_type = None
+
   return ConditionalFieldInfo(
     field_type=field_type,
     when=when,
@@ -849,15 +862,17 @@ class ConditionalModelMeta(type(BaseModel)):
     seen_signatures: Set[FrozenSet[str]] = set()
 
     for combo in combos:
-      variant_fields = dict(regular_fields)
+      variant_fields: Dict[str, Tuple[Type, Any]] = {}
       active_conditional_fields: Set[str] = set()
 
       # Fix control field values in this variant
+      control_field_overrides: Dict[str, Tuple[Type, Any]] = {}
       for cf_name, cf_val in combo.items():
         if cf_name in annotations:
-          variant_fields[cf_name] = (Literal[cf_val], cf_val)
+          control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
 
       # Evaluate each conditional field
+      conditional_field_values: Dict[str, Tuple[Type, Any]] = {}
       for field_name, cond_info in conditional_fields.items():
         when_ok = cond_info.evaluate(combo)
         bound_ok = cond_info.bound_active_result
@@ -865,11 +880,18 @@ class ConditionalModelMeta(type(BaseModel)):
         active = when_ok and bound_ok
 
         if active:
-          # Only add field when active, completely omit when inactive
           ftype, finfo = cond_info.make_field_info()
-          variant_fields[field_name] = (ftype, finfo)
+          conditional_field_values[field_name] = (ftype, finfo)
           active_conditional_fields.add(field_name)
-        # When not active: field is NOT added at all (complete removal)
+
+      # Build variant_fields in original annotation order
+      for field_name in annotations.keys():
+        if field_name in control_field_overrides:
+          variant_fields[field_name] = control_field_overrides[field_name]
+        elif field_name in conditional_field_values:
+          variant_fields[field_name] = conditional_field_values[field_name]
+        elif field_name in regular_fields:
+          variant_fields[field_name] = regular_fields[field_name]
 
       # Create signature to deduplicate equivalent variants
       signature_parts = [f"{k}={v}" for k, v in sorted(combo.items())] + sorted(active_conditional_fields)
@@ -978,14 +1000,14 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return new_cls
 
   @classmethod
-  def get_variants(cls) -> List[Type[BaseModel]]:
-    """Get all generated variant models."""
+  def _get_variants(cls) -> List[Type[BaseModel]]:
+    """Get all generated variant models (internal use)."""
     return cls.__variants__
 
   @classmethod
-  def as_union(cls) -> Type:
-    """Get the model as a Union type of all variants."""
-    variants = cls.get_variants()
+  def _as_union(cls) -> Type:
+    """Get the model as a Union type of all variants (internal use)."""
+    variants = cls._get_variants()
     if len(variants) == 1:
       return variants[0]
     return Union[tuple(variants)]
@@ -1024,7 +1046,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         "when_falsy, when_unbound, templates, or Cliteral). "
         "Call .bind() first to resolve them."
       )
-    variants = cls.get_variants()
+    variants = cls._get_variants()
     if len(variants) == 1:
       return variants[0].model_json_schema(by_alias=by_alias)
     return {"anyOf": [v.model_json_schema(by_alias=by_alias) for v in variants]}
