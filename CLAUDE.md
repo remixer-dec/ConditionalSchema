@@ -1,0 +1,11 @@
+- Keep the implementations simple, no need to over-engineer things
+- Prioritize extensibility and maintainability, so that when we decide to add new functionality, nothing will break
+- Test newly deployed functionality with mock data
+- Simplicity is priority, avoid unnecessary code 
+- Keep the code clean and self-explanatory, add comments only for non-obvious parts, excessive comments are discouraged
+- When multiple different in implementation but similar in approach piece of codes are used, decompose them in separate files, unless original implementation is meant to be in a single file 
+- Check that your new changes do not break existing functionality
+- Avoid flooding the repo with .md files, no need for documentation that is not asked for.
+- When changes are implemented, avoid commets like "NEW" or "===FIX===" within the code or within documentation, reflect them only in response body.
+- Keep the documentation up to date with implemented changes
+- Avoid rewriting files from scratch
