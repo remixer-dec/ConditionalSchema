@@ -80,3 +80,65 @@ location_type: str = CField(
              if_false=["Short location"]),
     when_truthy=["location"]
 )
+```
+
+### CRecord - Dynamic Object Schemas from Data
+
+Create object schemas where property names come from runtime data:
+
+**Standalone usage with CRecord:**
+```python
+from main import CRecord
+
+old_armor = [
+    {"armor_item_name": "helmet", "defense": 10},
+    {"armor_item_name": "chestplate", "defense": 25},
+]
+
+record = CRecord(
+    data=old_armor,
+    key_field="armor_item_name",
+    item_schema=UpdatableArmorItemModel,
+)
+
+# Get schema
+schema = record.json_schema()
+# {"type": "object", "properties": {"helmet": {...}, "chestplate": {...}}}
+
+# Access original data
+record.data_map  # {"helmet": {"armor_item_name": "helmet", ...}, ...}
+record.keys      # ["helmet", "chestplate"]
+```
+
+**Bind-time usage with Crecord:**
+```python
+class UpdateArmorForm(ConditionalModel):
+    armor_updates: dict = CField(
+        Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
+        when_truthy=["armor_data"]
+    )
+
+BoundForm = UpdateArmorForm.bind(armor_data=old_armor)
+schema = BoundForm.json_schema()
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `data` / `data_key` | `List[Dict] \| Dict[str, Dict]` / `str` | Data or context key |
+| `key_field` | `str \| Callable` | Field name or function to extract property names |
+| `item_schema` | `Type[BaseModel]` | Schema for each property's value |
+| `use_alias` | `bool` | Use field alias for key lookup (default: False) |
+| `required` | `bool` | Make all properties required (default: True) |
+| `additional_properties` | `bool` | Allow additional properties (default: False) |
+
+**Key extraction modes:**
+```python
+# Field name lookup
+CRecord(data, key_field="item_name", ...)
+
+# Alias lookup (uses model field's alias)
+CRecord(data, key_field="item_name", use_alias=True, ...)
+
+# Custom callable
+CRecord(data, key_field=lambda item: item["name"].lower(), ...)
+```

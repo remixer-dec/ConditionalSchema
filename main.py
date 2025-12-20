@@ -271,6 +271,379 @@ def Cliteral(
   return LiteralTemplate(key, mapping_or_condition, actual_if_true, if_false)
 
 
+class CRecord:
+  """
+  Creates a dynamic object schema from runtime data where property names come from the data itself.
+
+  This is useful when you have a list or dict of items and want to create a schema where:
+  - Each property name is derived from a field in the data
+  - Each property uses a specific model's schema
+
+  Supports two modes for data input:
+  1. List of dicts: Property names extracted from each item
+  2. Dict of dicts: Keys used as property names (values are the items)
+
+  Supports three modes for key extraction:
+  1. Field name: Uses the field name to look up values in items
+  2. Alias: Uses the model field's alias to look up values (use_alias=True)
+  3. Callable: Custom function to extract key from each item
+
+  Example:
+      # Given data like:
+      old_armor = [
+          {"armor_item_name": "helmet", "defense": 10},
+          {"armor_item_name": "chestplate", "defense": 25},
+      ]
+
+      # Create a record schema
+      armor_record = CRecord(
+          data=old_armor,
+          key_field="armor_item_name",
+          item_schema=UpdatableArmorItemModel,
+      )
+
+      # Get the schema
+      schema = armor_record.json_schema()
+      # {
+      #   "type": "object",
+      #   "properties": {
+      #     "helmet": {...UpdatableArmorItemModel schema...},
+      #     "chestplate": {...UpdatableArmorItemModel schema...},
+      #   },
+      #   "required": ["helmet", "chestplate"]
+      # }
+
+      # Access original data mapping
+      data_map = armor_record.data_map
+      # {"helmet": {"armor_item_name": "helmet", "defense": 10}, ...}
+  """
+
+  __slots__ = (
+    "_data",
+    "_key_field",
+    "_item_schema",
+    "_use_alias",
+    "_required",
+    "_data_map",
+    "_model",
+    "_additional_properties",
+  )
+
+  def __init__(
+    self,
+    data: Union[List[Dict[str, Any]], Dict[str, Dict[str, Any]]],
+    key_field: Union[str, Callable[[Dict[str, Any]], str]],
+    item_schema: Type[BaseModel],
+    use_alias: bool = False,
+    required: bool = True,
+    additional_properties: bool = False,
+  ):
+    """
+    Create a dynamic record schema.
+
+    Args:
+        data: Input data - either a list of dicts or a dict of dicts.
+              For list: property names are extracted using key_field.
+              For dict: the dict keys become property names.
+        key_field: How to extract property names from data items.
+              - str: Field name to use (looks up item[key_field])
+              - Callable: Function that takes an item and returns the key
+        item_schema: Pydantic model that defines the schema for each property's value.
+        use_alias: If True and key_field is a string, uses the model field's alias
+                   to look up values in items. Defaults to False.
+        required: If True, all properties are required. Defaults to True.
+        additional_properties: If True, allows additional properties in the schema.
+    """
+    self._data = data
+    self._key_field = key_field
+    self._item_schema = item_schema
+    self._use_alias = use_alias
+    self._required = required
+    self._additional_properties = additional_properties
+    self._data_map: Optional[Dict[str, Dict[str, Any]]] = None
+    self._model: Optional[Type[BaseModel]] = None
+
+  def _get_lookup_key(self) -> str:
+    """Get the key to use for looking up values in data items."""
+    if callable(self._key_field):
+      return None  # Callable handles its own extraction
+
+    if not self._use_alias:
+      return self._key_field
+
+    # Get alias from model field
+    field_info = self._item_schema.model_fields.get(self._key_field)
+    if field_info and field_info.alias:
+      return field_info.alias
+    return self._key_field
+
+  def _extract_key(self, item: Dict[str, Any]) -> str:
+    """Extract the property key from a data item."""
+    if callable(self._key_field):
+      return self._key_field(item)
+
+    lookup_key = self._get_lookup_key()
+    return item.get(lookup_key)
+
+  def _build_data_map(self) -> Dict[str, Dict[str, Any]]:
+    """Build the mapping from property names to original data items."""
+    if self._data_map is not None:
+      return self._data_map
+
+    if isinstance(self._data, dict):
+      # Dict input: keys are property names, values are items
+      self._data_map = dict(self._data)
+    else:
+      # List input: extract keys from each item
+      self._data_map = {}
+      for item in self._data:
+        key = self._extract_key(item)
+        if key is not None:
+          self._data_map[key] = item
+
+    return self._data_map
+
+  @property
+  def data_map(self) -> Dict[str, Dict[str, Any]]:
+    """
+    Get the mapping from property names to original data items.
+
+    Returns:
+        Dict mapping property names to their corresponding original data items.
+    """
+    return self._build_data_map()
+
+  @property
+  def keys(self) -> List[str]:
+    """Get the list of property names."""
+    return list(self.data_map.keys())
+
+  def model(self) -> Type[BaseModel]:
+    """
+    Get a dynamically created Pydantic model representing this record.
+
+    Returns:
+        A Pydantic model class with properties from the data.
+    """
+    if self._model is not None:
+      return self._model
+
+    data_map = self._build_data_map()
+
+    # Create fields for the dynamic model
+    fields: Dict[str, Tuple[Type, Any]] = {}
+    for key in data_map.keys():
+      if self._required:
+        fields[key] = (self._item_schema, ...)
+      else:
+        fields[key] = (Optional[self._item_schema], None)
+
+    self._model = create_model("DynamicRecord", **fields)
+    return self._model
+
+  def json_schema(self, by_alias: bool = False) -> Dict[str, Any]:
+    """
+    Get the JSON schema for this dynamic record.
+
+    Args:
+        by_alias: If True, uses aliases in the item schema.
+
+    Returns:
+        JSON schema dict with properties from the data.
+    """
+    data_map = self._build_data_map()
+    item_schema = self._item_schema.model_json_schema(by_alias=by_alias)
+
+    schema = {
+      "type": "object",
+      "properties": {key: item_schema for key in data_map.keys()},
+    }
+
+    if self._required:
+      schema["required"] = list(data_map.keys())
+
+    if not self._additional_properties:
+      schema["additionalProperties"] = False
+
+    return schema
+
+  def __repr__(self) -> str:
+    return f"CRecord(keys={self.keys!r}, item_schema={self._item_schema.__name__})"
+
+
+class CRecordTemplate:
+  """
+  Template for creating dynamic record schemas at bind time.
+
+  Similar to CRecord but designed for use with ConditionalModel.bind().
+  The data is retrieved from the bind context rather than being passed directly.
+
+  Example:
+      class UpdateForm(ConditionalModel):
+          armor: dict = CField(
+              Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
+              when_truthy=["armor_data"]
+          )
+
+      BoundForm = UpdateForm.bind(armor_data=old_armor)
+      schema = BoundForm.json_schema()
+  """
+
+  __slots__ = (
+    "_data_key",
+    "_key_field",
+    "_item_schema",
+    "_use_alias",
+    "_required",
+    "_additional_properties",
+    "_resolved_record",
+  )
+
+  def __init__(
+    self,
+    data_key: str,
+    key_field: Union[str, Callable[[Dict[str, Any]], str]],
+    item_schema: Type[BaseModel],
+    use_alias: bool = False,
+    required: bool = True,
+    additional_properties: bool = False,
+  ):
+    """
+    Create a record template for bind-time resolution.
+
+    Args:
+        data_key: Context key to retrieve data from during binding.
+        key_field: How to extract property names from data items.
+        item_schema: Pydantic model for each property's schema.
+        use_alias: If True, uses aliases for key lookup.
+        required: If True, all properties are required.
+        additional_properties: If True, allows additional properties.
+    """
+    self._data_key = data_key
+    self._key_field = key_field
+    self._item_schema = item_schema
+    self._use_alias = use_alias
+    self._required = required
+    self._additional_properties = additional_properties
+    self._resolved_record: Optional[CRecord] = None
+
+  @property
+  def data_key(self) -> str:
+    """The context key used to retrieve data."""
+    return self._data_key
+
+  def resolve(self, ctx: Dict[str, Any]) -> Type[BaseModel]:
+    """
+    Resolve to a dynamically generated model at bind time.
+
+    Args:
+        ctx: Bind context containing the data.
+
+    Returns:
+        Dynamically created Pydantic model, or dict if data not found.
+        When data is not found, returns dict type as placeholder (field
+        will likely be excluded by when_truthy conditions anyway).
+    """
+    data = ctx.get(self._data_key)
+
+    if data is None:
+      # Return dict as placeholder - field will be excluded by when_truthy
+      return dict
+
+    self._resolved_record = CRecord(
+      data=data,
+      key_field=self._key_field,
+      item_schema=self._item_schema,
+      use_alias=self._use_alias,
+      required=self._required,
+      additional_properties=self._additional_properties,
+    )
+
+    return self._resolved_record.model()
+
+  @property
+  def resolved_record(self) -> Optional[CRecord]:
+    """Get the resolved CRecord after binding (None if not yet resolved)."""
+    return self._resolved_record
+
+  def __repr__(self) -> str:
+    return f"Crecord({self._data_key!r}, {self._key_field!r}, {self._item_schema.__name__})"
+
+
+def Crecord(
+  data_key: str,
+  key_field: Union[str, Callable[[Dict[str, Any]], str]],
+  item_schema: Type[BaseModel],
+  use_alias: bool = False,
+  required: bool = True,
+  additional_properties: bool = False,
+) -> CRecordTemplate:
+  """
+  Create a dynamic record template for bind-time schema generation.
+
+  This creates an object schema where property names come from runtime data.
+  Use this with ConditionalModel when you need to create schemas based on
+  external data that's only available at bind time.
+
+  Args:
+      data_key: Context key to retrieve data from during binding.
+      key_field: How to extract property names from data items.
+          - str: Field name to look up in each item
+          - Callable: Function(item) -> str that extracts the key
+      item_schema: Pydantic model defining each property's schema.
+      use_alias: If True and key_field is a string, uses the model field's
+                 alias to look up values in items. Defaults to False.
+      required: If True, all generated properties are required. Defaults to True.
+      additional_properties: If True, allows additional properties. Defaults to False.
+
+  Returns:
+      CRecordTemplate that resolves at bind time.
+
+  Example:
+      class ArmorItemModel(BaseModel):
+          armor_item_name: str = Field(alias="armorItemName")
+          defense: int
+
+      class UpdatableArmorItemModel(BaseModel):
+          defense: int = Field(ge=0, le=100)
+
+      class UpdateArmorForm(ConditionalModel):
+          armor_updates: dict = CField(
+              Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
+              when_truthy=["armor_data"]
+          )
+
+      # At bind time, data is provided
+      old_armor = [
+          {"armor_item_name": "helmet", "defense": 10},
+          {"armor_item_name": "chestplate", "defense": 25},
+      ]
+      BoundForm = UpdateArmorForm.bind(armor_data=old_armor)
+
+      # Schema includes properties for each armor item
+      schema = BoundForm.json_schema()
+      # armor_updates will have properties: {"helmet": ..., "chestplate": ...}
+
+      # Using aliases for key lookup
+      armor_record = Crecord("armor_data", "armor_item_name",
+                             UpdatableArmorItemModel, use_alias=True)
+      # Now looks for "armorItemName" in data items instead of "armor_item_name"
+
+      # Using callable for custom key extraction
+      armor_record = Crecord("armor_data",
+                             lambda item: item["name"].lower(),
+                             UpdatableArmorItemModel)
+  """
+  return CRecordTemplate(
+    data_key=data_key,
+    key_field=key_field,
+    item_schema=item_schema,
+    use_alias=use_alias,
+    required=required,
+    additional_properties=additional_properties,
+  )
+
+
 
 class _TruthyCheck:
   """Sentinel class to indicate a truthy check condition."""
@@ -497,6 +870,7 @@ class ConditionalFieldInfo:
       or self.when_unbound
       or self.when_bound
       or isinstance(self.field_type, LiteralTemplate)
+      or isinstance(self.field_type, CRecordTemplate)
       or isinstance(self.pattern, Template)
       or isinstance(self.enum, Template)
       or isinstance(self.description, Template)
@@ -516,6 +890,9 @@ class ConditionalFieldInfo:
 
     if isinstance(self.field_type, LiteralTemplate):
       # Resolve LiteralTemplate to actual Literal type
+      resolved_type = self.field_type.resolve(ctx)
+    elif isinstance(self.field_type, CRecordTemplate):
+      # Resolve CRecordTemplate to a dynamically generated model
       resolved_type = self.field_type.resolve(ctx)
     elif get_origin(self.field_type) is Literal:
       # Resolve string templates in Literal args
@@ -1062,10 +1439,13 @@ __all__ = [
   "UNBOUND",
   "Ctemplate",
   "Cliteral",
+  "Crecord",
   "CField",
   "ConditionalModel",
   "Template",
   "LiteralTemplate",
+  "CRecord",
+  "CRecordTemplate",
   "AnyOf",
   "NoneOf",
   "ConditionalFieldInfo",
