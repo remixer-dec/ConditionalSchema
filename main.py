@@ -1281,9 +1281,15 @@ class ConditionalModelMeta(type(BaseModel)):
     """Generate all variant models based on control field combinations."""
 
     # Collect all control fields (fields that affect conditional logic)
+    # Exclude control fields that are inactive conditional fields
     control_fields: Set[str] = set()
     for cf in conditional_fields.values():
-      control_fields.update(cf.dependency_fields)
+      for dep_field in cf.dependency_fields:
+        # Skip if the dependency is an inactive conditional field
+        if dep_field in conditional_fields:
+          if not conditional_fields[dep_field].bound_active_result:
+            continue
+        control_fields.add(dep_field)
 
     control_fields_frozen = frozenset(control_fields)
 
@@ -1318,15 +1324,23 @@ class ConditionalModelMeta(type(BaseModel)):
           if alias:
             control_field_overrides[cf_name] = (
               Literal[cf_val],
-              Field(default=cf_val, alias=alias),
+              Field(alias=alias),
             )
           else:
-            control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
+            control_field_overrides[cf_name] = (Literal[cf_val], ...)
 
       # Evaluate each conditional field
       conditional_field_values: Dict[str, Tuple[Type, Any]] = {}
       for field_name, cond_info in conditional_fields.items():
-        when_ok = cond_info.evaluate(combo)
+        # Check if any dependency is an inactive conditional field
+        deps_ok = True
+        for dep_field in cond_info.dependency_fields:
+          if dep_field in conditional_fields:
+            if not conditional_fields[dep_field].bound_active_result:
+              deps_ok = False
+              break
+
+        when_ok = cond_info.evaluate(combo) if deps_ok else False
         bound_ok = cond_info.bound_active_result
 
         active = when_ok and bound_ok
