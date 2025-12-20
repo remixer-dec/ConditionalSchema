@@ -1246,7 +1246,18 @@ class ConditionalModelMeta(type(BaseModel)):
       control_field_overrides: Dict[str, Tuple[Type, Any]] = {}
       for cf_name, cf_val in combo.items():
         if cf_name in annotations:
-          control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
+          # Preserve alias from regular field if present
+          if cf_name in regular_fields:
+            _, original_field = regular_fields[cf_name]
+            if isinstance(original_field, FieldInfo) and original_field.alias:
+              control_field_overrides[cf_name] = (
+                Literal[cf_val],
+                Field(default=cf_val, alias=original_field.alias),
+              )
+            else:
+              control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
+          else:
+            control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
 
       # Evaluate each conditional field
       conditional_field_values: Dict[str, Tuple[Type, Any]] = {}
