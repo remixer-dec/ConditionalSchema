@@ -1437,7 +1437,24 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     variants = cls._get_variants()
     if len(variants) == 1:
       return variants[0].model_json_schema(by_alias=by_alias)
-    return {"anyOf": [v.model_json_schema(by_alias=by_alias) for v in variants]}
+
+    # Collect schemas and merge $defs to root level
+    variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
+    merged_defs = {}
+    cleaned_schemas = []
+
+    for schema in variant_schemas:
+      if "$defs" in schema:
+        merged_defs.update(schema["$defs"])
+        schema_copy = {k: v for k, v in schema.items() if k != "$defs"}
+        cleaned_schemas.append(schema_copy)
+      else:
+        cleaned_schemas.append(schema)
+
+    result = {"anyOf": cleaned_schemas}
+    if merged_defs:
+      result["$defs"] = merged_defs
+    return result
 
 
 __all__ = [
