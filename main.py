@@ -877,6 +877,51 @@ class ConditionalFieldInfo:
       or (get_origin(self.field_type) is Literal and any(isinstance(a, str) and "{" in a for a in get_args(self.field_type)))
     )
 
+  def resolve_aliases(self, alias_to_field: Dict[str, str]) -> None:
+    """Resolve alias keys in when/when_any conditions to field names."""
+    if not alias_to_field:
+      return
+
+    changed = False
+
+    # Resolve aliases in 'when' conditions
+    if self.when:
+      resolved_when = {}
+      for key, value in self.when.items():
+        resolved_key = alias_to_field.get(key)
+        if resolved_key:
+          resolved_when[resolved_key] = value
+          changed = True
+        else:
+          resolved_when[key] = value
+      if changed:
+        self.when = resolved_when
+
+    # Resolve aliases in 'when_any' conditions
+    if self.when_any:
+      resolved_when_any = []
+      any_changed = False
+      for cond_set in self.when_any:
+        resolved_set = {}
+        set_changed = False
+        for key, value in cond_set.items():
+          resolved_key = alias_to_field.get(key)
+          if resolved_key:
+            resolved_set[resolved_key] = value
+            set_changed = True
+          else:
+            resolved_set[key] = value
+        resolved_when_any.append(resolved_set if set_changed else cond_set)
+        if set_changed:
+          any_changed = True
+      if any_changed:
+        self.when_any = resolved_when_any
+        changed = True
+
+    # Clear dependency cache only if conditions changed
+    if changed:
+      self._dependency_fields_cache = None
+
   def resolve_templates(self, ctx: Dict[str, Any]) -> "ConditionalFieldInfo":
     """Resolve all template values with the given context."""
 
@@ -1192,6 +1237,19 @@ class ConditionalModelMeta(type(BaseModel)):
         else:
           regular_fields[field_name] = (annotations[field_name], ...)
 
+    # Build alias-to-field-name mapping for resolving aliases in when conditions
+    alias_to_field: Dict[str, str] = {}
+    for field_name, (_, field_value) in regular_fields.items():
+      if isinstance(field_value, FieldInfo) and field_value.alias:
+        alias_to_field[field_value.alias] = field_name
+    for field_name, cond_info in conditional_fields.items():
+      if cond_info.alias:
+        alias_to_field[cond_info.alias] = field_name
+
+    # Resolve aliases in when conditions to field names
+    for cond_info in conditional_fields.values():
+      cond_info.resolve_aliases(alias_to_field)
+
     # Check if binding is required
     needs_bind = any(cf.requires_bind for cf in conditional_fields.values())
 
@@ -1246,16 +1304,22 @@ class ConditionalModelMeta(type(BaseModel)):
       control_field_overrides: Dict[str, Tuple[Type, Any]] = {}
       for cf_name, cf_val in combo.items():
         if cf_name in annotations:
-          # Preserve alias from regular field if present
+          # Preserve alias from regular field or conditional field
+          alias = None
           if cf_name in regular_fields:
             _, original_field = regular_fields[cf_name]
             if isinstance(original_field, FieldInfo) and original_field.alias:
-              control_field_overrides[cf_name] = (
-                Literal[cf_val],
-                Field(default=cf_val, alias=original_field.alias),
-              )
-            else:
-              control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
+              alias = original_field.alias
+          elif cf_name in conditional_fields:
+            cond_field = conditional_fields[cf_name]
+            if cond_field.alias:
+              alias = cond_field.alias
+
+          if alias:
+            control_field_overrides[cf_name] = (
+              Literal[cf_val],
+              Field(default=cf_val, alias=alias),
+            )
           else:
             control_field_overrides[cf_name] = (Literal[cf_val], cf_val)
 
