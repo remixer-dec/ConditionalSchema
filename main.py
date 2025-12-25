@@ -1732,7 +1732,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     }
 
     if field_type in type_mapping:
-      return type_mapping[field_type]
+      return type_mapping[field_type].copy()
 
     # Handle Optional types
     origin = get_origin(field_type)
@@ -1761,8 +1761,15 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     if origin is dict:
       return {"type": "object"}
 
-    # Default fallback
-    return {}
+    # Handle Pydantic models
+    try:
+      if isinstance(field_type, type) and issubclass(field_type, BaseModel):
+        return field_type.model_json_schema()
+    except (TypeError, AttributeError):
+      pass
+
+    # Default fallback - use object type
+    return {"type": "object"}
 
   @classmethod
   def json_schema(
