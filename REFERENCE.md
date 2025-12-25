@@ -24,7 +24,53 @@
 | `.bind(**ctx)` | Resolve templates and bind-time conditions |
 | `._get_variants()` | Get list of variant models (internal use) |
 | `._as_union()` | Get Union type of all variants (internal use) |
-| `.json_schema(by_alias=False)` | Get JSON schema (with anyOf if multiple variants) |
+| `.json_schema(by_alias=False, fill_inactive=False, inactive_default=None)` | Get JSON schema (with anyOf if multiple variants) |
+
+#### json_schema() Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `by_alias` | `bool` | `False` | Use field aliases in schema |
+| `fill_inactive` | `bool` | `False` | Fill inactive conditional fields with default values instead of removing them |
+| `inactive_default` | `Any \| Dict[str, Any]` | `None` | Default value for inactive fields. Can be a single value (applied to all) or a dict mapping field names to specific defaults |
+
+**Examples:**
+
+```python
+class PetForm(ConditionalModel):
+    has_pet: CYesNo
+    pet_name: str = CField(when={"has_pet": "yes"})
+    pet_age: int = CField(when={"has_pet": "yes"})
+
+# Default - inactive fields are removed (anyOf behavior)
+schema = PetForm.json_schema()
+
+# Fill inactive fields with null default
+schema = PetForm.json_schema(fill_inactive=True)
+# When has_pet="no", pet_name and pet_age will have "default": null
+
+# Fill inactive fields with custom global default
+schema = PetForm.json_schema(
+    fill_inactive=True,
+    inactive_default=""
+)
+# When has_pet="no", pet_name and pet_age will have "default": ""
+
+# Fill inactive fields with per-field defaults
+schema = PetForm.json_schema(
+    fill_inactive=True,
+    inactive_default={"pet_name": "No pet", "pet_age": 0}
+)
+# pet_name will have "default": "No pet", pet_age will have "default": 0
+
+# Use field's own default value
+class Form(ConditionalModel):
+    enabled: bool
+    name: str = CField(when={"enabled": True}, default="Unknown")
+
+schema = Form.json_schema(fill_inactive=True)
+# When enabled=False, name will have "default": "Unknown"
+```
 
 ### Condition Helpers
 
