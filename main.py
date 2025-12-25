@@ -1479,7 +1479,141 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
-  def json_schema(cls, by_alias: bool = False) -> Dict[str, Any]:
+  def _add_inactive_fields_to_schema(
+    cls,
+    schema: Dict[str, Any],
+    variant: Type[BaseModel],
+    by_alias: bool,
+    inactive_default: Any,
+  ) -> Dict[str, Any]:
+    """
+    Add inactive conditional fields to schema with default values.
+
+    Args:
+        schema: The variant's JSON schema
+        variant: The variant model
+        by_alias: Whether to use aliases
+        inactive_default: Default value(s) for inactive fields
+
+    Returns:
+        Modified schema with inactive fields added
+    """
+    # Get all conditional fields
+    conditional_fields = cls.__cfields__
+    if not conditional_fields:
+      return schema
+
+    # Get active fields in this variant
+    active_fields = set(variant.model_fields.keys())
+
+    # Ensure schema has properties dict
+    if "properties" not in schema:
+      schema["properties"] = {}
+
+    # Ensure schema has required list if it exists
+    if "required" not in schema:
+      schema["required"] = []
+
+    # Process each conditional field
+    for field_name, cond_info in conditional_fields.items():
+      # Skip if field is already active in this variant
+      if field_name in active_fields:
+        continue
+
+      # Determine the field name to use in schema
+      schema_field_name = cond_info.alias if (by_alias and cond_info.alias) else field_name
+
+      # Determine the default value to use
+      if isinstance(inactive_default, dict):
+        # Per-field default values
+        default_value = inactive_default.get(field_name, None)
+      elif cond_info.default is not ...:
+        # Use the field's own default if specified
+        default_value = cond_info.default
+      else:
+        # Use the global inactive_default
+        default_value = inactive_default
+
+      # Create a basic schema for the inactive field
+      field_type = cond_info.field_type
+      type_schema = cls._get_type_schema(field_type)
+
+      # Add default value to the schema
+      type_schema["default"] = default_value
+
+      # Add description if available
+      if cond_info.description and not isinstance(cond_info.description, Template):
+        type_schema["description"] = cond_info.description
+
+      # Add the field to properties
+      schema["properties"][schema_field_name] = type_schema
+
+    return schema
+
+  @classmethod
+  def _get_type_schema(cls, field_type: Any) -> Dict[str, Any]:
+    """
+    Get a basic JSON schema for a Python type.
+
+    Args:
+        field_type: The Python type
+
+    Returns:
+        Basic JSON schema dict
+    """
+    if field_type is None or field_type is Any:
+      return {"type": "null"}
+
+    # Handle basic types
+    type_mapping = {
+      str: {"type": "string"},
+      int: {"type": "integer"},
+      float: {"type": "number"},
+      bool: {"type": "boolean"},
+      dict: {"type": "object"},
+      list: {"type": "array"},
+    }
+
+    if field_type in type_mapping:
+      return type_mapping[field_type]
+
+    # Handle Optional types
+    origin = get_origin(field_type)
+    if origin is Union:
+      args = get_args(field_type)
+      # Check if it's Optional (Union with None)
+      if type(None) in args:
+        non_none_types = [t for t in args if t is not type(None)]
+        if len(non_none_types) == 1:
+          return cls._get_type_schema(non_none_types[0])
+        # Multiple non-None types in Union
+        return {"anyOf": [cls._get_type_schema(t) for t in non_none_types]}
+
+    # Handle Literal types
+    if origin is Literal:
+      args = get_args(field_type)
+      return {"enum": list(args)}
+
+    # Handle list/dict with type parameters
+    if origin is list:
+      args = get_args(field_type)
+      if args:
+        return {"type": "array", "items": cls._get_type_schema(args[0])}
+      return {"type": "array"}
+
+    if origin is dict:
+      return {"type": "object"}
+
+    # Default fallback
+    return {}
+
+  @classmethod
+  def json_schema(
+    cls,
+    by_alias: bool = False,
+    fill_inactive: bool = False,
+    inactive_default: Any = None,
+  ) -> Dict[str, Any]:
     """
     Get the JSON schema for this model.
 
@@ -1489,6 +1623,13 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     Args:
         by_alias: If True, use field aliases in schema instead of field names.
                  Falls back to field name if no alias is defined.
+        fill_inactive: If True, inactive conditional fields are included in the
+                 schema with a default value instead of being removed completely.
+                 Defaults to False.
+        inactive_default: Default value to use for inactive conditional fields.
+                 If None (default), uses null in JSON schema. Can be set to any
+                 value (e.g., "", 0, {}, []) or a dict mapping field names to
+                 specific defaults.
 
     Raises:
         ValueError: If the model has bind-time conditions and .bind()
@@ -1505,6 +1646,20 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         # With by_alias - uses aliases
         Form.json_schema(by_alias=True)
         # {"properties": {"userName": {...}}}
+
+        # Fill inactive fields with null default
+        Form.json_schema(fill_inactive=True)
+        # Inactive fields are included with "default": null
+
+        # Fill inactive fields with custom default
+        Form.json_schema(fill_inactive=True, inactive_default="")
+        # Inactive fields are included with "default": ""
+
+        # Per-field defaults
+        Form.json_schema(
+            fill_inactive=True,
+            inactive_default={"pet_name": "", "age": 0}
+        )
     """
     if cls.__needs_bind__:
       raise ValueError(
@@ -1513,11 +1668,26 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         "Call .bind() first to resolve them."
       )
     variants = cls._get_variants()
+
+    if fill_inactive:
+      # Process schemas to add inactive fields with defaults
+      variant_schemas = []
+      for v in variants:
+        schema = v.model_json_schema(by_alias=by_alias)
+        schema = cls._add_inactive_fields_to_schema(
+          schema,
+          v,
+          by_alias,
+          inactive_default
+        )
+        variant_schemas.append(schema)
+    else:
+      variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
+
     if len(variants) == 1:
-      return variants[0].model_json_schema(by_alias=by_alias)
+      return variant_schemas[0]
 
     # Collect schemas and merge $defs to root level
-    variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
     merged_defs = {}
     cleaned_schemas = []
 
