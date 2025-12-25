@@ -1534,6 +1534,228 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       result["$defs"] = merged_defs
     return result
 
+  @classmethod
+  def propdoc(
+    cls,
+    by_alias: bool = False,
+    lazy: bool = True,
+    mention_depends: bool = False,
+    mention_options: bool = False,
+  ) -> str:
+    """
+    Get a compact documentation string for all properties.
+
+    Args:
+        by_alias: If True, use field aliases instead of field names.
+        lazy: If True (default), ignore bind-time conditions and list all properties.
+              If False, only include properties that pass bind-time conditions.
+        mention_depends: If True, add condition text like "only if x is y" for each field.
+                         This can be slower as it analyzes all conditions.
+        mention_options: If True, show available options for Literal and enum fields.
+
+    Returns:
+        A multi-line string with property names and their descriptions.
+
+    Example:
+        class Form(ConditionalModel):
+            name: str = CField(alias="userName", description="User's full name")
+            age: int = CField(description="User's age", when={"has_age": True})
+
+        print(Form.propdoc())
+        # name: User's full name
+        # age: User's age
+
+        print(Form.propdoc(by_alias=True, mention_depends=True))
+        # userName: User's full name
+        # age: User's age (only if has_age is True)
+    """
+    cache_key = (by_alias, lazy, mention_depends, mention_options)
+    cache = getattr(cls, "__propdoc_cache__", None)
+    if cache is None:
+      cache = {}
+      type.__setattr__(cls, "__propdoc_cache__", cache)
+
+    if cache_key in cache:
+      return cache[cache_key]
+
+    lines = []
+    cfields = getattr(cls, "__cfields__", {})
+    rfields = getattr(cls, "__rfields__", {})
+    annots = getattr(cls, "__annots__", {})
+
+    for field_name in annots.keys():
+      prop_name = field_name
+      description = None
+      condition_text = ""
+      options_text = ""
+
+      if field_name in cfields:
+        cond_info = cfields[field_name]
+
+        if not lazy and not cond_info.bound_active_result:
+          continue
+
+        if by_alias and cond_info.alias:
+          prop_name = cond_info.alias
+
+        if isinstance(cond_info.description, Template):
+          desc_val = cond_info.description.value
+          if isinstance(desc_val, str):
+            description = desc_val
+          elif callable(desc_val):
+            description = "<dynamic>"
+          else:
+            description = str(desc_val)
+        else:
+          description = cond_info.description
+
+        if mention_depends:
+          alias_map = cls._build_alias_map() if by_alias else {}
+          condition_text = cls._format_conditions(cond_info, alias_map)
+
+        if mention_options:
+          options_text = cls._get_options_text(cond_info.field_type, cond_info.enum)
+
+      elif field_name in rfields:
+        _, field_value = rfields[field_name]
+        if isinstance(field_value, FieldInfo):
+          if by_alias and field_value.alias:
+            prop_name = field_value.alias
+          description = field_value.description
+
+        if mention_options:
+          field_type = annots.get(field_name)
+          options_text = cls._get_options_text(field_type, None)
+
+      else:
+        if mention_options:
+          field_type = annots.get(field_name)
+          options_text = cls._get_options_text(field_type, None)
+
+      line = prop_name
+      if description:
+        line += f": {description}"
+      if options_text:
+        line += f" {options_text}"
+      if condition_text:
+        line += f" ({condition_text})"
+      lines.append(line)
+
+    result = "\n".join(lines)
+    cache[cache_key] = result
+    return result
+
+  @staticmethod
+  def _get_options_text(field_type: Any, enum_values: Optional[List]) -> str:
+    """Extract options text from Literal types or enum values."""
+    options = []
+
+    if enum_values:
+      options = list(enum_values)
+    elif field_type is not None:
+      origin = get_origin(field_type)
+      if origin is Literal:
+        options = list(get_args(field_type))
+      elif isinstance(field_type, LiteralTemplate):
+        if field_type.mapping:
+          all_opts = set()
+          for opts in field_type.mapping.values():
+            all_opts.update(opts)
+          if field_type.default:
+            all_opts.update(field_type.default)
+          options = sorted(all_opts)
+        elif field_type.if_true or field_type.if_false:
+          all_opts = set()
+          if field_type.if_true:
+            all_opts.update(field_type.if_true)
+          if field_type.if_false:
+            all_opts.update(field_type.if_false)
+          options = sorted(all_opts)
+
+    if options:
+      opts_str = ", ".join(str(o) for o in options)
+      return f"(Choose one: {opts_str})"
+    return ""
+
+  @classmethod
+  def _build_alias_map(cls) -> Dict[str, str]:
+    """Build a mapping from field names to their aliases."""
+    alias_map: Dict[str, str] = {}
+    cfields = getattr(cls, "__cfields__", {})
+    rfields = getattr(cls, "__rfields__", {})
+
+    for field_name, cond_info in cfields.items():
+      if cond_info.alias:
+        alias_map[field_name] = cond_info.alias
+
+    for field_name, (_, field_value) in rfields.items():
+      if isinstance(field_value, FieldInfo) and field_value.alias:
+        alias_map[field_name] = field_value.alias
+
+    return alias_map
+
+  @staticmethod
+  def _format_conditions(
+    cond_info: "ConditionalFieldInfo",
+    alias_map: Optional[Dict[str, str]] = None,
+  ) -> str:
+    """Format condition information as a readable string."""
+    parts = []
+
+    def resolve_name(field: str) -> str:
+      if alias_map:
+        return alias_map.get(field, field)
+      return field
+
+    def format_condition(name: str, value: Any) -> str:
+      if isinstance(value, AnyOf):
+        vals = ", ".join(str(v) for v in value.get_values())
+        return f"{name} is either {vals}"
+      elif isinstance(value, NoneOf):
+        vals = ", ".join(str(v) for v in value.get_values())
+        return f"{name} is neither {vals}"
+      else:
+        return f"{name} is {value}"
+
+    if cond_info.when:
+      when_parts = [format_condition(resolve_name(f), v) for f, v in cond_info.when.items()]
+      if when_parts:
+        parts.append("only if " + " and ".join(when_parts))
+
+    if cond_info.when_any:
+      any_parts = []
+      for cond_set in cond_info.when_any:
+        set_parts = [format_condition(resolve_name(f), v) for f, v in cond_set.items()]
+        if set_parts:
+          any_parts.append("(" + " and ".join(set_parts) + ")")
+      if any_parts:
+        parts.append("when " + " or ".join(any_parts))
+
+    if cond_info.when_truthy:
+      resolved = [resolve_name(f) for f in cond_info.when_truthy]
+      parts.append("requires " + ", ".join(resolved))
+
+    if cond_info.when_falsy:
+      resolved = [resolve_name(f) for f in cond_info.when_falsy]
+      parts.append("requires not " + ", ".join(resolved))
+
+    if cond_info.when_unbound:
+      resolved = [resolve_name(f) for f in cond_info.when_unbound]
+      parts.append("requires unset " + ", ".join(resolved))
+
+    if cond_info.when_bound:
+      bound_parts = []
+      for field, value in cond_info.when_bound.items():
+        name = resolve_name(field)
+        if callable(value) and not isinstance(value, (AnyOf, NoneOf)):
+          bound_parts.append(f"{name} matches condition")
+        else:
+          bound_parts.append(format_condition(name, value))
+      if bound_parts:
+        parts.append("bound " + " and ".join(bound_parts))
+
+    return "; ".join(parts)
+
 
 __all__ = [
   "CYesNo",
