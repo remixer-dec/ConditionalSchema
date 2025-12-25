@@ -1479,6 +1479,153 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
+  def _create_merged_schema(
+    cls,
+    variants: List[Type[BaseModel]],
+    by_alias: bool,
+    inactive_default: Any,
+  ) -> Dict[str, Any]:
+    """
+    Create a single merged schema with all fields present.
+    Control fields use their full type, conditional fields have defaults.
+
+    Args:
+        variants: List of variant models
+        by_alias: Whether to use aliases
+        inactive_default: Default value(s) for inactive fields
+
+    Returns:
+        Single merged schema without anyOf
+    """
+    if not variants:
+      return {"type": "object", "properties": {}, "required": []}
+
+    # Use first variant as base
+    base_variant = variants[0]
+    base_schema = base_variant.model_json_schema(by_alias=by_alias)
+
+    # Get all conditional fields
+    conditional_fields = cls.__cfields__
+    regular_fields = cls.__rfields__
+    annotations = cls.__annots__
+
+    # Collect all fields that appear in ANY variant
+    all_fields: Set[str] = set()
+    for variant in variants:
+      all_fields.update(variant.model_fields.keys())
+
+    # Build the merged schema
+    merged_properties = {}
+    required_fields = []
+
+    # Determine which fields are control fields (referenced in when conditions)
+    control_field_names: Set[str] = set()
+    for cf in conditional_fields.values():
+      control_field_names.update(cf.dependency_fields)
+
+    # Process each field
+    for field_name in annotations.keys():
+      schema_field_name = field_name
+
+      # Check if this is a conditional field
+      if field_name in conditional_fields:
+        cond_info = conditional_fields[field_name]
+
+        # Skip fields excluded by bind-time conditions
+        if not cond_info.bound_active_result:
+          continue
+
+        # Use alias if specified
+        if by_alias and cond_info.alias:
+          schema_field_name = cond_info.alias
+
+        # Determine if this field is a control field or conditional field
+        is_control_field = field_name in control_field_names
+
+        if is_control_field:
+          # Control field that's also conditional: use full type from annotation
+          field_type = cond_info.field_type
+          type_schema = cls._get_type_schema(field_type)
+          merged_properties[schema_field_name] = type_schema
+          required_fields.append(schema_field_name)
+        else:
+          # Conditional field: add with default
+          field_type = cond_info.field_type
+          type_schema = cls._get_type_schema(field_type)
+
+          # Determine default value
+          if isinstance(inactive_default, dict):
+            default_value = inactive_default.get(field_name, None)
+          elif inactive_default is not None:
+            default_value = inactive_default
+          elif cond_info.default is not ...:
+            default_value = cond_info.default
+          else:
+            default_value = None
+
+          type_schema["default"] = default_value
+
+          if cond_info.description and not isinstance(cond_info.description, Template):
+            type_schema["description"] = cond_info.description
+
+          merged_properties[schema_field_name] = type_schema
+
+      elif field_name in regular_fields:
+        # Regular field: always required, use normal schema
+        field_type, field_info = regular_fields[field_name]
+
+        # Use alias if specified
+        if by_alias and isinstance(field_info, FieldInfo) and field_info.alias:
+          schema_field_name = field_info.alias
+
+        # Get schema from base variant
+        if schema_field_name in base_schema.get("properties", {}):
+          merged_properties[schema_field_name] = base_schema["properties"][schema_field_name]
+        else:
+          type_schema = cls._get_type_schema(field_type)
+          merged_properties[schema_field_name] = type_schema
+
+        required_fields.append(schema_field_name)
+
+      else:
+        # Field only in annotations (no default value, not a CField)
+        # These are typically control fields - use original type, not const from variant
+        field_type = annotations[field_name]
+        type_schema = cls._get_type_schema(field_type)
+
+        # Copy metadata from base schema if available (title, description, etc.)
+        if schema_field_name in base_schema.get("properties", {}):
+          base_prop = base_schema["properties"][schema_field_name]
+          if "title" in base_prop:
+            type_schema["title"] = base_prop["title"]
+          if "description" in base_prop:
+            type_schema["description"] = base_prop["description"]
+
+        merged_properties[schema_field_name] = type_schema
+        required_fields.append(schema_field_name)
+
+    # Build final schema
+    result = {
+      "type": "object",
+      "properties": merged_properties,
+      "required": required_fields,
+    }
+
+    # Add $defs if present in base schema
+    if "$defs" in base_schema:
+      result["$defs"] = base_schema["$defs"]
+
+    # Add title from base schema
+    if "title" in base_schema:
+      # Use a generic title without variant suffix
+      title = base_schema["title"]
+      if "_" in title:
+        title = title.rsplit("_", 1)[0]
+      result["title"] = title
+
+    return result
+
+  @classmethod
   def _add_inactive_fields_to_schema(
     cls,
     schema: Dict[str, Any],
@@ -1680,19 +1827,11 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     variants = cls._get_variants()
 
     if fill_inactive:
-      # Process schemas to add inactive fields with defaults
-      variant_schemas = []
-      for v in variants:
-        schema = v.model_json_schema(by_alias=by_alias)
-        schema = cls._add_inactive_fields_to_schema(
-          schema,
-          v,
-          by_alias,
-          inactive_default
-        )
-        variant_schemas.append(schema)
-    else:
-      variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
+      # Create a single merged schema with all fields present
+      return cls._create_merged_schema(variants, by_alias, inactive_default)
+
+    # Normal behavior: return anyOf variants
+    variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
 
     if len(variants) == 1:
       return variant_schemas[0]

@@ -15,26 +15,33 @@ def test_basic_inactive_with_defaults():
         pet_name: str = CField(when={"has_pet": "yes"})
         pet_age: int = CField(when={"has_pet": "yes"})
 
-    # Without fill_inactive (default behavior)
+    # Without fill_inactive (default behavior - anyOf)
     schema_without = PetForm.json_schema()
     print("Schema WITHOUT fill_inactive:")
     print(json.dumps(schema_without, indent=2))
 
-    # With fill_inactive (new behavior)
+    # With fill_inactive (new behavior - single schema, no anyOf)
     schema_with = PetForm.json_schema(fill_inactive=True)
     print("\nSchema WITH fill_inactive=True:")
     print(json.dumps(schema_with, indent=2))
 
-    # Verify that inactive fields are included with null defaults
-    for variant in schema_with["anyOf"]:
-        props = variant.get("properties", {})
-        if props.get("has_pet", {}).get("enum") == ["no"]:
-            # When has_pet=no, pet_name and pet_age should have defaults
-            assert "pet_name" in props, "pet_name should be in schema"
-            assert "pet_age" in props, "pet_age should be in schema"
-            assert props["pet_name"]["default"] is None, "pet_name default should be None"
-            assert props["pet_age"]["default"] is None, "pet_age default should be None"
-            print("\n✓ Inactive fields have null defaults")
+    # Verify that fill_inactive eliminates anyOf
+    assert "anyOf" in schema_without, "Without fill_inactive should have anyOf"
+    assert "anyOf" not in schema_with, "With fill_inactive should NOT have anyOf"
+
+    # Verify control field uses enum
+    assert schema_with["properties"]["has_pet"]["enum"] == ["yes", "no"]
+
+    # Verify conditional fields have defaults
+    assert schema_with["properties"]["pet_name"]["default"] is None
+    assert schema_with["properties"]["pet_age"]["default"] is None
+
+    # Verify only control field is required
+    assert schema_with["required"] == ["has_pet"]
+
+    print("\n✓ Inactive fields have null defaults")
+    print("✓ No anyOf in schema")
+    print("✓ Schema is smaller and simpler")
 
     print("PASSED\n")
 
@@ -51,20 +58,14 @@ def test_custom_global_default():
         pet_age: int = CField(when={"has_pet": "yes"})
 
     # Use empty string as default for inactive fields
-    schema = PetForm.json_schema(
-        fill_inactive=True,
-        inactive_default=""
-    )
+    schema = PetForm.json_schema(fill_inactive=True, inactive_default="")
     print("Schema with inactive_default='':")
     print(json.dumps(schema, indent=2))
 
     # Verify defaults
-    for variant in schema["anyOf"]:
-        props = variant.get("properties", {})
-        if props.get("has_pet", {}).get("enum") == ["no"]:
-            assert props["pet_name"]["default"] == "", "Default should be empty string"
-            assert props["pet_age"]["default"] == "", "Default should be empty string"
-            print("\n✓ Inactive fields have custom default: ''")
+    assert schema["properties"]["pet_name"]["default"] == ""
+    assert schema["properties"]["pet_age"]["default"] == ""
+    print("\n✓ Inactive fields have custom default: ''")
 
     print("PASSED\n")
 
@@ -83,21 +84,15 @@ def test_per_field_defaults():
     # Use different defaults for different fields
     schema = PetForm.json_schema(
         fill_inactive=True,
-        inactive_default={
-            "pet_name": "No pet",
-            "pet_age": 0
-        }
+        inactive_default={"pet_name": "No pet", "pet_age": 0}
     )
     print("Schema with per-field defaults:")
     print(json.dumps(schema, indent=2))
 
     # Verify defaults
-    for variant in schema["anyOf"]:
-        props = variant.get("properties", {})
-        if props.get("has_pet", {}).get("enum") == ["no"]:
-            assert props["pet_name"]["default"] == "No pet"
-            assert props["pet_age"]["default"] == 0
-            print("\n✓ Inactive fields have per-field defaults")
+    assert schema["properties"]["pet_name"]["default"] == "No pet"
+    assert schema["properties"]["pet_age"]["default"] == 0
+    print("\n✓ Inactive fields have per-field defaults")
 
     print("PASSED\n")
 
@@ -119,12 +114,9 @@ def test_field_default_value():
     print(json.dumps(schema, indent=2))
 
     # Verify defaults
-    for variant in schema["anyOf"]:
-        props = variant.get("properties", {})
-        if props.get("has_pet", {}).get("enum") == ["no"]:
-            assert props["pet_name"]["default"] == "Unknown"
-            assert props["pet_age"]["default"] == -1
-            print("\n✓ Inactive fields use their own defaults")
+    assert schema["properties"]["pet_name"]["default"] == "Unknown"
+    assert schema["properties"]["pet_age"]["default"] == -1
+    print("\n✓ Inactive fields use their own defaults")
 
     print("PASSED\n")
 
@@ -141,22 +133,17 @@ def test_with_aliases():
         pet_age: int = CField(alias="petAge", when={"has_pet": "yes"})
 
     # With by_alias=True
-    schema = PetForm.json_schema(
-        by_alias=True,
-        fill_inactive=True
-    )
+    schema = PetForm.json_schema(by_alias=True, fill_inactive=True)
     print("Schema with by_alias=True and fill_inactive=True:")
     print(json.dumps(schema, indent=2))
 
     # Verify that aliases are used in schema
-    for variant in schema["anyOf"]:
-        props = variant.get("properties", {})
-        if props.get("hasPet", {}).get("enum") == ["no"]:
-            assert "petName" in props, "Should use alias petName"
-            assert "petAge" in props, "Should use alias petAge"
-            assert props["petName"]["default"] is None
-            assert props["petAge"]["default"] is None
-            print("\n✓ Inactive fields use aliases correctly")
+    assert "hasPet" in schema["properties"]
+    assert "petName" in schema["properties"]
+    assert "petAge" in schema["properties"]
+    assert schema["properties"]["petName"]["default"] is None
+    assert schema["properties"]["petAge"]["default"] is None
+    print("\n✓ Inactive fields use aliases correctly")
 
     print("PASSED\n")
 
@@ -167,63 +154,26 @@ def test_complex_types():
     print("Test: Complex field types")
     print("=" * 60)
 
-    from typing import List, Optional
+    from typing import List, Optional, Literal
 
     class Form(ConditionalModel):
-        mode: str
+        mode: Literal["basic", "advanced"]
         tags: List[str] = CField(when={"mode": "advanced"})
         config: dict = CField(when={"mode": "advanced"})
         optional_field: Optional[str] = CField(when={"mode": "advanced"})
 
     schema = Form.json_schema(
         fill_inactive=True,
-        inactive_default={
-            "tags": [],
-            "config": {},
-        }
+        inactive_default={"tags": [], "config": {}}
     )
     print("Schema with complex types:")
     print(json.dumps(schema, indent=2))
 
-    # Find the variant where mode != "advanced"
-    for variant in schema.get("anyOf", [schema]):
-        props = variant.get("properties", {})
-        # Check if this variant has the inactive fields
-        if "tags" in props and "default" in props["tags"]:
-            assert props["tags"]["default"] == []
-            assert props["config"]["default"] == {}
-            assert props["optional_field"]["default"] is None
-            print("\n✓ Complex types handled correctly")
-            break
-
-    print("PASSED\n")
-
-
-def test_single_variant_model():
-    """Test with a model that has only one variant."""
-    print("=" * 60)
-    print("Test: Single variant model with runtime condition")
-    print("=" * 60)
-
-    from typing import Literal
-
-    class SimpleForm(ConditionalModel):
-        mode: Literal["simple", "detailed"]
-        description: str = CField(when={"mode": "detailed"})
-
-    schema = SimpleForm.json_schema(fill_inactive=True)
-    print("Schema for single variant with inactive field:")
-    print(json.dumps(schema, indent=2))
-
-    # Find the variant where mode="simple"
-    for variant in schema.get("anyOf", [schema]):
-        props = variant.get("properties", {})
-        if props.get("mode", {}).get("const") == "simple":
-            # Verify description field is included with default
-            assert "description" in props, "description should be filled"
-            assert props["description"]["default"] is None
-            print("\n✓ Runtime-excluded field filled with default")
-            break
+    # Verify complex types
+    assert schema["properties"]["tags"]["default"] == []
+    assert schema["properties"]["config"]["default"] == {}
+    assert schema["properties"]["optional_field"]["default"] is None
+    print("\n✓ Complex types handled correctly")
 
     print("PASSED\n")
 
@@ -253,6 +203,39 @@ def test_bind_exclusion_not_filled():
     print("PASSED\n")
 
 
+def test_no_anyof():
+    """Test that fill_inactive eliminates anyOf."""
+    print("=" * 60)
+    print("Test: fill_inactive eliminates anyOf")
+    print("=" * 60)
+
+    class Form(ConditionalModel):
+        mode: CYesNo
+        optional: str = CField(when={"mode": "yes"})
+
+    # Without fill_inactive
+    schema_without = Form.json_schema()
+    # With fill_inactive
+    schema_with = Form.json_schema(fill_inactive=True)
+
+    print("Without fill_inactive:")
+    print(f"  Has anyOf: {'anyOf' in schema_without}")
+    print(f"  Size: {len(json.dumps(schema_without))} chars")
+
+    print("\nWith fill_inactive:")
+    print(f"  Has anyOf: {'anyOf' in schema_with}")
+    print(f"  Size: {len(json.dumps(schema_with))} chars")
+
+    assert "anyOf" in schema_without
+    assert "anyOf" not in schema_with
+
+    reduction = len(json.dumps(schema_without)) - len(json.dumps(schema_with))
+    print(f"\nSize reduction: {reduction} chars ({reduction/len(json.dumps(schema_without))*100:.1f}%)")
+    print("✓ fill_inactive eliminates anyOf and reduces schema size")
+
+    print("PASSED\n")
+
+
 def run_all_tests():
     """Run all tests."""
     test_basic_inactive_with_defaults()
@@ -261,8 +244,8 @@ def run_all_tests():
     test_field_default_value()
     test_with_aliases()
     test_complex_types()
-    test_single_variant_model()
     test_bind_exclusion_not_filled()
+    test_no_anyof()
 
     print("=" * 60)
     print("ALL TESTS PASSED!")
