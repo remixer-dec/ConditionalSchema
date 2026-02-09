@@ -873,6 +873,7 @@ class ConditionalFieldInfo:
       or isinstance(self.field_type, CRecordTemplate)
       or isinstance(self.pattern, Template)
       or isinstance(self.enum, Template)
+      or (isinstance(self.description, str) and "{" in self.description)
       or isinstance(self.description, Template)
       or (get_origin(self.field_type) is Literal and any(isinstance(a, str) and "{" in a for a in get_args(self.field_type)))
     )
@@ -928,6 +929,8 @@ class ConditionalFieldInfo:
     def resolve(val: Any) -> Any:
       if isinstance(val, Template):
         return val.resolve(ctx)
+      elif isinstance(val, str) and "{" in val:
+         return val.format(**ctx)
       return val
 
     # Resolve field type
