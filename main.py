@@ -324,6 +324,7 @@ class CRecord:
     "_item_schema",
     "_use_alias",
     "_required",
+    "_flatten",
     "_data_map",
     "_model",
     "_additional_properties",
@@ -336,6 +337,7 @@ class CRecord:
     item_schema: Type[BaseModel],
     use_alias: bool = False,
     required: bool = True,
+    flatten: bool = False,
     additional_properties: bool = False,
   ):
     """
@@ -362,6 +364,7 @@ class CRecord:
     self._additional_properties = additional_properties
     self._data_map: Optional[Dict[str, Dict[str, Any]]] = None
     self._model: Optional[Type[BaseModel]] = None
+    self._flatten = flatten
 
   def _get_lookup_key(self) -> str:
     """Get the key to use for looking up values in data items."""
@@ -432,13 +435,19 @@ class CRecord:
 
     # Create fields for the dynamic model
     fields: Dict[str, Tuple[Type, Any]] = {}
+    fields_info = list(self._item_schema.model_fields.items())
+    single_field = self._flatten and len(fields_info) == 1
+    value_type = fields_info[0][1].annotation if single_field else self._item_schema
+
     for key in data_map.keys():
       if self._required:
-        fields[key] = (self._item_schema, ...)
+        fields[key] = (value_type, ...)
       else:
-        fields[key] = (Optional[self._item_schema], None)
+        fields[key] = (Optional[value_type], None)
 
     self._model = create_model("DynamicRecord", **fields)
+    if single_field:
+      type.__setattr__(self._model, "__crecord_item_schema__", self._item_schema)
     return self._model
 
   def json_schema(self, by_alias: bool = False) -> Dict[str, Any]:
@@ -452,7 +461,13 @@ class CRecord:
         JSON schema dict with properties from the data.
     """
     data_map = self._build_data_map()
-    item_schema = self._item_schema.model_json_schema(by_alias=by_alias)
+    fields_info = list(self._item_schema.model_fields.items())
+    if self._flatten and len(fields_info) == 1:
+      single_field_name = fields_info[0][0]
+      full_schema = self._item_schema.model_json_schema(by_alias=by_alias)
+      item_schema = full_schema.get("properties", {}).get(single_field_name, {})
+    else:
+      item_schema = self._item_schema.model_json_schema(by_alias=by_alias)
 
     schema = {
       "type": "object",
@@ -495,6 +510,7 @@ class CRecordTemplate:
     "_item_schema",
     "_use_alias",
     "_required",
+    "_flatten",
     "_additional_properties",
     "_resolved_record",
   )
@@ -506,6 +522,7 @@ class CRecordTemplate:
     item_schema: Type[BaseModel],
     use_alias: bool = False,
     required: bool = True,
+    flatten: bool = False,
     additional_properties: bool = False,
   ):
     """
@@ -525,6 +542,7 @@ class CRecordTemplate:
     self._use_alias = use_alias
     self._required = required
     self._additional_properties = additional_properties
+    self._flatten = flatten
     self._resolved_record: Optional[CRecord] = None
 
   @property
@@ -556,6 +574,7 @@ class CRecordTemplate:
       item_schema=self._item_schema,
       use_alias=self._use_alias,
       required=self._required,
+      flatten=self._flatten,
       additional_properties=self._additional_properties,
     )
 
@@ -576,6 +595,7 @@ def Crecord(
   item_schema: Type[BaseModel],
   use_alias: bool = False,
   required: bool = True,
+  flatten: bool = False,
   additional_properties: bool = False,
 ) -> CRecordTemplate:
   """
@@ -640,9 +660,9 @@ def Crecord(
     item_schema=item_schema,
     use_alias=use_alias,
     required=required,
+    flatten=flatten,
     additional_properties=additional_properties,
   )
-
 
 
 class _TruthyCheck:
@@ -787,7 +807,7 @@ class ConditionalFieldInfo:
     # Check 'when' conditions (all must match)
     for field_name, condition in self.when.items():
       if field_name not in combo:
-        continue
+        return False
       actual = combo[field_name]
       if isinstance(condition, AnyOf):
         if not condition.evaluate(actual):
@@ -805,7 +825,8 @@ class ConditionalFieldInfo:
         all_in_set_match = True
         for field_name, condition in condition_set.items():
           if field_name not in combo:
-            continue
+            all_in_set_match = False
+            break
           actual = combo[field_name]
           if isinstance(condition, AnyOf):
             if not condition.evaluate(actual):
@@ -874,6 +895,7 @@ class ConditionalFieldInfo:
       or isinstance(self.pattern, Template)
       or isinstance(self.enum, Template)
       or (isinstance(self.description, str) and "{" in self.description)
+      or (isinstance(self.alias, str) and "{" in self.alias)
       or isinstance(self.description, Template)
       or (get_origin(self.field_type) is Literal and any(isinstance(a, str) and "{" in a for a in get_args(self.field_type)))
     )
@@ -930,7 +952,7 @@ class ConditionalFieldInfo:
       if isinstance(val, Template):
         return val.resolve(ctx)
       elif isinstance(val, str) and "{" in val:
-         return val.format(**ctx)
+        return val.format(**ctx)
       return val
 
     # Resolve field type
@@ -964,7 +986,7 @@ class ConditionalFieldInfo:
       when_falsy=[],  # Already evaluated
       when_unbound=[],  # Already evaluated
       default=self.default,
-      alias=self.alias,
+      alias=resolve(self.alias),
       description=resolve(self.description),
       pattern=resolve(self.pattern),
       enum=resolve(self.enum),
@@ -1141,7 +1163,6 @@ def CField(
   )
 
 
-
 def _has_template_in_type(field_type: Any) -> bool:
   """Check if a type annotation contains template placeholders."""
   if isinstance(field_type, LiteralTemplate):
@@ -1231,7 +1252,30 @@ class ConditionalModelMeta(type(BaseModel)):
         if field_value.field_type is None:
           field_value.field_type = annotations.get(field_name, Any)
         conditional_fields[field_name] = field_value
-        del namespace[field_name]
+
+        # FIX: Only convert to Pydantic field if it doesn't require binding
+        # Fields with templates or bind-time conditions must wait for .bind()
+        if not field_value.requires_bind:
+          ftype, finfo = field_value.make_field_info()
+          namespace[field_name] = finfo
+        else:
+          # Keep it as ConditionalFieldInfo for now, will be resolved at bind time
+          # Create a placeholder field so the base model at least knows about it
+          extra = dict(field_value.field_kwargs)
+          # Don't include template values that haven't been resolved
+          if not isinstance(field_value.pattern, Template):
+            extra["pattern"] = field_value.pattern
+          if not isinstance(field_value.enum, Template):
+            if field_value.enum:
+              extra["json_schema_extra"] = {"enum": field_value.enum}
+
+          namespace[field_name] = Field(
+            default=field_value.default,
+            alias=field_value.alias,
+            description=field_value.description if not isinstance(field_value.description, Template) else None,
+            **extra,
+          )
+
       elif field_name in annotations and not field_name.startswith("_"):
         if isinstance(field_value, FieldInfo):
           regular_fields[field_name] = (annotations[field_name], field_value)
@@ -1309,9 +1353,40 @@ class ConditionalModelMeta(type(BaseModel)):
       variant_fields: Dict[str, Tuple[Type, Any]] = {}
       active_conditional_fields: Set[str] = set()
 
+      # Iteratively resolve active conditional fields
+      changed = True
+      while changed:
+        changed = False
+        for field_name, cond_info in conditional_fields.items():
+          if field_name in active_conditional_fields:
+            continue
+
+          if not cond_info.bound_active_result:
+            continue
+
+          temp_combo = {}
+          for k, v in combo.items():
+            if k in regular_fields or k in active_conditional_fields or k not in conditional_fields:
+              temp_combo[k] = v
+
+          if cond_info.evaluate(temp_combo):
+            active_conditional_fields.add(field_name)
+            changed = True
+
+      # Evaluate each conditional field
+      conditional_field_values: Dict[str, Tuple[Type, Any]] = {}
+      for field_name in active_conditional_fields:
+        cond_info = conditional_fields[field_name]
+        ftype, finfo = cond_info.make_field_info()
+        conditional_field_values[field_name] = (ftype, finfo)
+
       # Fix control field values in this variant
       control_field_overrides: Dict[str, Tuple[Type, Any]] = {}
       for cf_name, cf_val in combo.items():
+        is_active_cf = cf_name in regular_fields or cf_name in active_conditional_fields or cf_name not in conditional_fields
+        if not is_active_cf:
+          continue
+
         if cf_name in annotations:
           # Preserve alias from regular field or conditional field
           alias = None
@@ -1332,27 +1407,6 @@ class ConditionalModelMeta(type(BaseModel)):
           else:
             control_field_overrides[cf_name] = (Literal[cf_val], ...)
 
-      # Evaluate each conditional field
-      conditional_field_values: Dict[str, Tuple[Type, Any]] = {}
-      for field_name, cond_info in conditional_fields.items():
-        # Check if any dependency is an inactive conditional field
-        deps_ok = True
-        for dep_field in cond_info.dependency_fields:
-          if dep_field in conditional_fields:
-            if not conditional_fields[dep_field].bound_active_result:
-              deps_ok = False
-              break
-
-        when_ok = cond_info.evaluate(combo) if deps_ok else False
-        bound_ok = cond_info.bound_active_result
-
-        active = when_ok and bound_ok
-
-        if active:
-          ftype, finfo = cond_info.make_field_info()
-          conditional_field_values[field_name] = (ftype, finfo)
-          active_conditional_fields.add(field_name)
-
       # Build variant_fields in original annotation order
       for field_name in annotations.keys():
         if field_name in control_field_overrides:
@@ -1363,7 +1417,8 @@ class ConditionalModelMeta(type(BaseModel)):
           variant_fields[field_name] = regular_fields[field_name]
 
       # Create signature to deduplicate equivalent variants
-      signature_parts = [f"{k}={v}" for k, v in sorted(combo.items())] + sorted(active_conditional_fields)
+      active_combo = {k: v for k, v in combo.items() if k in control_field_overrides}
+      signature_parts = [f"{k}={v}" for k, v in sorted(active_combo.items())] + sorted(active_conditional_fields)
       signature = frozenset(signature_parts)
 
       # Skip duplicate variants
@@ -1372,7 +1427,7 @@ class ConditionalModelMeta(type(BaseModel)):
       seen_signatures.add(signature)
 
       # Create variant name
-      suffix_parts = [str(v) for v in combo.values()] if combo else ["default"]
+      suffix_parts = [str(v) for v in active_combo.values()] if active_combo else ["default"]
       suffix = "_".join(suffix_parts)
 
       variant = create_model(f"{name}_{suffix}", **variant_fields)
@@ -1458,13 +1513,30 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       annots,
     )
 
+    # Build namespace for the bound model so Pydantic populates model_fields
+    namespace: Dict[str, Any] = {"__annotations__": {}}
+
+    for name in annots:
+      if name in rfields:
+        typ, val = rfields[name]
+        namespace["__annotations__"][name] = typ
+        if val is not ...:
+          namespace[name] = val
+      elif name in resolved:
+        cf = resolved[name]
+        if cf.bound_active_result:
+          ftype, finfo = cf.make_field_info()
+          namespace["__annotations__"][name] = ftype
+          namespace[name] = finfo
+
     # Create bound class
-    new_cls = type(f"{cls.__name__}_Bound", (ConditionalModel,), {})
+    new_cls = type(f"{cls.__name__}_Bound", (ConditionalModel,), namespace)
     type.__setattr__(new_cls, "__variants__", variants)
     type.__setattr__(new_cls, "__cfields__", resolved)
     type.__setattr__(new_cls, "__rfields__", rfields)
     type.__setattr__(new_cls, "__annots__", annots)
     type.__setattr__(new_cls, "__needs_bind__", False)
+    type.__setattr__(new_cls, "__bind_ctx__", ctx)
 
     return new_cls
 
@@ -1537,6 +1609,56 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       result["$defs"] = merged_defs
     return result
 
+  @staticmethod
+  def _extract_nested_models(field_type: Any) -> "Set[Type[BaseModel]]":
+    """Recursively extract BaseModel subclasses from a type annotation."""
+    models: Set[Type[BaseModel]] = set()
+    if field_type is None:
+      return models
+    if isinstance(field_type, CRecordTemplate):
+      models.add(field_type._item_schema)
+      return models
+    if isinstance(field_type, type) and issubclass(field_type, BaseModel):
+      if field_type.__name__ == "DynamicRecord":
+        item_schema = getattr(field_type, "__crecord_item_schema__", None)
+        if item_schema is not None:
+          models.add(item_schema)
+          return models
+        for f in field_type.model_fields.values():
+          ann = f.annotation
+          if get_origin(ann) is Union:
+            for arg in get_args(ann):
+              if arg is not type(None) and isinstance(arg, type) and issubclass(arg, BaseModel):
+                models.add(arg)
+          elif ann is not None and isinstance(ann, type) and issubclass(ann, BaseModel):
+            models.add(ann)
+        return models
+      models.add(field_type)
+      return models
+    origin = get_origin(field_type)
+    if origin is not None:
+      for arg in get_args(field_type):
+        models.update(ConditionalModel._extract_nested_models(arg))
+    return models
+
+  @staticmethod
+  def _nested_model_propdoc(model: Type[BaseModel], by_alias: bool = False, ctx: Dict[str, Any] = {}) -> str:
+    lines = []
+    for field_name, field_info in model.model_fields.items():
+      prop_name = (field_info.alias or field_name) if by_alias else field_name
+      line = f"  {prop_name}"
+      desc = field_info.description
+      if desc and isinstance(desc, str) and "{" in desc and ctx:
+        desc = desc.format(**ctx)
+      if desc:
+        line += f": {desc}"
+      field_type = model.__annotations__.get(field_name)
+      if field_type is not None and get_origin(field_type) is Literal:
+        opts = ", ".join(str(a) for a in get_args(field_type))
+        line += f" (Choose one: {opts})"
+      lines.append(line)
+    return "\n".join(lines)
+
   @classmethod
   def propdoc(
     cls,
@@ -1558,7 +1680,6 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
 
     Returns:
         A multi-line string with property names and their descriptions.
-
     Example:
         class Form(ConditionalModel):
             name: str = CField(alias="userName", description="User's full name")
@@ -1582,6 +1703,9 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       return cache[cache_key]
 
     lines = []
+    nested_models: Dict[Type[BaseModel], List[str]] = {}  # model -> list of field names using it
+    nested_model_is_record: Set[Type[BaseModel]] = set()
+    bind_ctx = getattr(cls, "__bind_ctx__", {})
     cfields = getattr(cls, "__cfields__", {})
     rfields = getattr(cls, "__rfields__", {})
     annots = getattr(cls, "__annots__", {})
@@ -1591,6 +1715,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       description = None
       condition_text = ""
       options_text = ""
+      field_type = annots.get(field_name)
 
       if field_name in cfields:
         cond_info = cfields[field_name]
@@ -1610,7 +1735,13 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
           else:
             description = str(desc_val)
         else:
-          description = cond_info.description
+          desc = cond_info.description
+          if isinstance(desc, Template):
+            description = desc.resolve(bind_ctx)
+          elif isinstance(desc, str) and "{" in desc and bind_ctx:
+            description = desc.format(**bind_ctx)
+          else:
+            description = desc
 
         if mention_depends:
           alias_map = cls._build_alias_map() if by_alias else {}
@@ -1618,6 +1749,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
 
         if mention_options:
           options_text = cls._get_options_text(cond_info.field_type, cond_info.enum)
+
+        field_type = cond_info.field_type
 
       elif field_name in rfields:
         _, field_value = rfields[field_name]
@@ -1627,13 +1760,19 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
           description = field_value.description
 
         if mention_options:
-          field_type = annots.get(field_name)
           options_text = cls._get_options_text(field_type, None)
 
       else:
         if mention_options:
-          field_type = annots.get(field_name)
           options_text = cls._get_options_text(field_type, None)
+
+      # Collect nested models
+      for model in cls._extract_nested_models(field_type):
+        nested_models.setdefault(model, []).append(prop_name)
+        if isinstance(field_type, CRecordTemplate) or (
+          isinstance(field_type, type) and issubclass(field_type, BaseModel) and field_type.__name__ == "DynamicRecord"
+        ):
+          nested_model_is_record.add(model)
 
       line = prop_name
       if description:
@@ -1643,6 +1782,19 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       if condition_text:
         line += f" ({condition_text})"
       lines.append(line)
+
+    # Append nested schema docs (each unique model only once)
+    if nested_models:
+      lines.append("")
+      for model, used_by in nested_models.items():
+        used_str = ", ".join(used_by)
+        if model in nested_model_is_record:
+          lines.append(f"{model.__name__} (record values, used by {used_str}):")
+        else:
+          lines.append(f"{model.__name__} (used by {used_str}):")
+        inner = cls._nested_model_propdoc(model, by_alias=by_alias, ctx=bind_ctx)
+        if inner:
+          lines.append(inner)
 
     result = "\n".join(lines)
     cache[cache_key] = result
