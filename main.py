@@ -1710,7 +1710,16 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     rfields = getattr(cls, "__rfields__", {})
     annots = getattr(cls, "__annots__", {})
 
+    active_fields = set(annots.keys())
+    if not getattr(cls, "__needs_bind__", False):
+      active_fields = set()
+      for variant in getattr(cls, "__variants__", []):
+        active_fields.update(variant.model_fields.keys())
+
     for field_name in annots.keys():
+      if field_name not in active_fields:
+        continue
+
       prop_name = field_name
       description = None
       condition_text = ""
@@ -1719,9 +1728,6 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
 
       if field_name in cfields:
         cond_info = cfields[field_name]
-
-        if not lazy and not cond_info.bound_active_result:
-          continue
 
         if by_alias and cond_info.alias:
           prop_name = cond_info.alias
