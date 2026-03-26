@@ -1172,6 +1172,57 @@ def _has_template_in_type(field_type: Any) -> bool:
   return False
 
 
+def _build_compact_schema(variant_schemas: List[Dict[str, Any]], merged_defs: Dict[str, Any]) -> Dict[str, Any]:
+  """
+  Build a compact anyOf schema by extracting common properties into $defs/Base.
+
+  Fields with identical schemas across all variants are extracted to a shared
+  base definition, so each variant only lists its unique (discriminator/conditional)
+  fields.
+  """
+  # Find properties whose schema is identical in every variant
+  first_props = variant_schemas[0].get("properties", {})
+  common_props = {
+    key: val
+    for key, val in first_props.items()
+    if all(s.get("properties", {}).get(key) == val for s in variant_schemas[1:])
+  }
+
+  if not common_props:
+    # Nothing to share; fall back to standard anyOf
+    result: Dict[str, Any] = {"anyOf": variant_schemas}
+    if merged_defs:
+      result["$defs"] = merged_defs
+    return result
+
+  all_required = [set(s.get("required", [])) for s in variant_schemas]
+  # Base required = fields required in every variant AND defined in Base properties
+  base_required = set.intersection(*all_required) & set(common_props.keys())
+
+  base_def: Dict[str, Any] = {"type": "object", "properties": common_props}
+  if base_required:
+    base_def["required"] = sorted(base_required)
+
+  compact_variants = []
+  for schema in variant_schemas:
+    variant_props = {k: v for k, v in schema.get("properties", {}).items() if k not in common_props}
+    variant_required = [r for r in schema.get("required", []) if r not in base_required]
+
+    variant_extra: Dict[str, Any] = {}
+    if variant_props:
+      variant_extra["properties"] = variant_props
+    if variant_required:
+      variant_extra["required"] = variant_required
+
+    if variant_extra:
+      compact_variants.append({"allOf": [{"$ref": "#/$defs/Base"}, variant_extra]})
+    else:
+      compact_variants.append({"$ref": "#/$defs/Base"})
+
+  defs = {"Base": base_def, **merged_defs}
+  return {"anyOf": compact_variants, "$defs": defs}
+
+
 def _get_control_values(
   control_fields: FrozenSet[str],
   annotations: Dict[str, Type],
@@ -1554,7 +1605,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
-  def json_schema(cls, by_alias: bool = False) -> Dict[str, Any]:
+  def json_schema(cls, by_alias: bool = False, compact: bool = False) -> Dict[str, Any]:
     """
     Get the JSON schema for this model.
 
@@ -1564,6 +1615,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     Args:
         by_alias: If True, use field aliases in schema instead of field names.
                  Falls back to field name if no alias is defined.
+        compact: If True, extract fields common to all variants into a shared
+                 $defs/Base reference to reduce schema size.
 
     Raises:
         ValueError: If the model has bind-time conditions and .bind()
@@ -1603,6 +1656,9 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         cleaned_schemas.append(schema_copy)
       else:
         cleaned_schemas.append(schema)
+
+    if compact:
+      return _build_compact_schema(cleaned_schemas, merged_defs)
 
     result = {"anyOf": cleaned_schemas}
     if merged_defs:
