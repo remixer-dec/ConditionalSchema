@@ -1650,10 +1650,22 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         "when_falsy, when_unbound, templates, or Cliteral). "
         "Call .bind() first to resolve them."
       )
+
+    cache_key = (by_alias, compact, descriptions)
+    cache = getattr(cls, "__schema_cache__", None)
+    if cache is None:
+      cache = {}
+      type.__setattr__(cls, "__schema_cache__", cache)
+    if cache_key in cache:
+      return cache[cache_key]
+
     variants = cls._get_variants()
     if len(variants) == 1:
-      schema = variants[0].model_json_schema(by_alias=by_alias)
-      return schema if descriptions else _strip_descriptions(schema)
+      result = variants[0].model_json_schema(by_alias=by_alias)
+      if not descriptions:
+        result = _strip_descriptions(result)
+      cache[cache_key] = result
+      return result
 
     # Collect schemas and merge $defs to root level
     variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
@@ -1675,7 +1687,11 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
       if merged_defs:
         result["$defs"] = merged_defs
 
-    return result if descriptions else _strip_descriptions(result)
+    if not descriptions:
+      result = _strip_descriptions(result)
+
+    cache[cache_key] = result
+    return result
 
   @staticmethod
   def _extract_nested_models(field_type: Any) -> "Set[Type[BaseModel]]":
