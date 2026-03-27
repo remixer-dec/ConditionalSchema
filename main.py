@@ -1614,7 +1614,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
-  def json_schema(cls, by_alias: bool = False, compact: bool = False, descriptions: bool = True) -> Dict[str, Any]:
+  def json_schema(cls, by_alias: bool = False, compact: bool = False, descriptions: bool = True, cache: bool = False) -> Dict[str, Any]:
     """
     Get the JSON schema for this model.
 
@@ -1627,6 +1627,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         compact: If True, extract fields common to all variants into a shared
                  $defs/Base reference to reduce schema size.
         descriptions: If False, strip all 'description' fields from the schema.
+        cache: If True, cache the result on the class keyed by (by_alias, compact, descriptions).
+               Enable when the same bound class is reused across multiple calls.
 
     Raises:
         ValueError: If the model has bind-time conditions and .bind()
@@ -1651,20 +1653,22 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         "Call .bind() first to resolve them."
       )
 
-    cache_key = (by_alias, compact, descriptions)
-    cache = getattr(cls, "__schema_cache__", None)
-    if cache is None:
-      cache = {}
-      type.__setattr__(cls, "__schema_cache__", cache)
-    if cache_key in cache:
-      return cache[cache_key]
+    if cache:
+      cache_key = (by_alias, compact, descriptions)
+      schema_cache = getattr(cls, "__schema_cache__", None)
+      if schema_cache is None:
+        schema_cache = {}
+        type.__setattr__(cls, "__schema_cache__", schema_cache)
+      if cache_key in schema_cache:
+        return schema_cache[cache_key]
 
     variants = cls._get_variants()
     if len(variants) == 1:
       result = variants[0].model_json_schema(by_alias=by_alias)
       if not descriptions:
         result = _strip_descriptions(result)
-      cache[cache_key] = result
+      if cache:
+        schema_cache[cache_key] = result
       return result
 
     # Collect schemas and merge $defs to root level
@@ -1690,7 +1694,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     if not descriptions:
       result = _strip_descriptions(result)
 
-    cache[cache_key] = result
+    if cache:
+      schema_cache[cache_key] = result
     return result
 
   @staticmethod
