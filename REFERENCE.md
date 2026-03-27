@@ -24,12 +24,19 @@
 | `.bind(**ctx)` | Resolve templates and bind-time conditions |
 | `._get_variants()` | Get list of variant models (internal use) |
 | `._as_union()` | Get Union type of all variants (internal use) |
-| `.json_schema(by_alias=False, compact=False)` | Get JSON schema (with anyOf if multiple variants) |
+| `.json_schema(by_alias=False, compact=False, descriptions=True, cache=False)` | Get JSON schema (with anyOf if multiple variants) |
 | `.propdoc(by_alias=False, lazy=True, mention_depends=False, mention_options=False)` | Get a human-readable string of property names and descriptions |
 
-#### `json_schema(compact=True)`
+#### `json_schema()` parameters
 
-When `compact=True`, fields with identical schemas across all variants are extracted into a shared `$defs/Base` definition. Each variant in `anyOf` then uses `allOf [$ref, variant-specific]` instead of repeating shared properties, reducing schema size proportionally to the number of shared fields and variants.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `by_alias` | `False` | Use field aliases instead of field names |
+| `compact` | `False` | Extract common fields into `$defs/Base` to reduce schema size |
+| `descriptions` | `True` | When `False`, strip all `description` fields from the output |
+| `cache` | `False` | Cache the result on the class; enable when the same bound class is reused across multiple calls |
+
+**`compact=True`** — fields with identical schemas across all variants are extracted into a shared `$defs/Base` definition. Each variant in `anyOf` then uses `allOf [$ref, variant-specific]` instead of repeating shared properties, reducing schema size proportionally to the number of shared fields and variants.
 
 ```python
 class Form(ConditionalModel):
@@ -44,6 +51,19 @@ Form.json_schema()
 # Compact schema extracts `name` to $defs/Base
 Form.json_schema(compact=True)
 # {"anyOf": [{"allOf": [{"$ref": "#/$defs/Base"}, {"properties": {"mode": ...}}]}, ...], "$defs": {"Base": {"properties": {"name": ...}}}}
+```
+
+**`descriptions=False`** — strips all `description` fields recursively. Useful for token-budget-sensitive contexts (e.g. constrained decoding with xgrammar).
+
+```python
+BoundForm.json_schema(descriptions=False)
+```
+
+**`cache=True`** — stores the result on the bound class keyed by `(by_alias, compact, descriptions)`. At most 8 entries per class (all combinations of 3 booleans). Suitable when the same bound class is called multiple times within a request. Avoid for per-request binds with unique context values, as each `.bind()` produces a new class.
+
+```python
+BoundForm.json_schema(cache=True)  # built and stored
+BoundForm.json_schema(cache=True)  # returned from cache
 ```
 
 #### `propdoc()`
