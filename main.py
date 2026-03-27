@@ -1172,6 +1172,15 @@ def _has_template_in_type(field_type: Any) -> bool:
   return False
 
 
+def _strip_descriptions(schema: Any) -> Any:
+  """Recursively remove all 'description' keys from a schema dict."""
+  if isinstance(schema, dict):
+    return {k: _strip_descriptions(v) for k, v in schema.items() if k != "description"}
+  if isinstance(schema, list):
+    return [_strip_descriptions(item) for item in schema]
+  return schema
+
+
 def _build_compact_schema(variant_schemas: List[Dict[str, Any]], merged_defs: Dict[str, Any]) -> Dict[str, Any]:
   """
   Build a compact anyOf schema by extracting common properties into $defs/Base.
@@ -1605,7 +1614,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
-  def json_schema(cls, by_alias: bool = False, compact: bool = False) -> Dict[str, Any]:
+  def json_schema(cls, by_alias: bool = False, compact: bool = False, descriptions: bool = True, cache: bool = False) -> Dict[str, Any]:
     """
     Get the JSON schema for this model.
 
@@ -1617,6 +1626,9 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
                  Falls back to field name if no alias is defined.
         compact: If True, extract fields common to all variants into a shared
                  $defs/Base reference to reduce schema size.
+        descriptions: If False, strip all 'description' fields from the schema.
+        cache: If True, cache the result on the class keyed by (by_alias, compact, descriptions).
+               Enable when the same bound class is reused across multiple calls.
 
     Raises:
         ValueError: If the model has bind-time conditions and .bind()
@@ -1640,9 +1652,24 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         "when_falsy, when_unbound, templates, or Cliteral). "
         "Call .bind() first to resolve them."
       )
+
+    if cache:
+      cache_key = (by_alias, compact, descriptions)
+      schema_cache = getattr(cls, "__schema_cache__", None)
+      if schema_cache is None:
+        schema_cache = {}
+        type.__setattr__(cls, "__schema_cache__", schema_cache)
+      if cache_key in schema_cache:
+        return schema_cache[cache_key]
+
     variants = cls._get_variants()
     if len(variants) == 1:
-      return variants[0].model_json_schema(by_alias=by_alias)
+      result = variants[0].model_json_schema(by_alias=by_alias)
+      if not descriptions:
+        result = _strip_descriptions(result)
+      if cache:
+        schema_cache[cache_key] = result
+      return result
 
     # Collect schemas and merge $defs to root level
     variant_schemas = [v.model_json_schema(by_alias=by_alias) for v in variants]
@@ -1658,11 +1685,17 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         cleaned_schemas.append(schema)
 
     if compact:
-      return _build_compact_schema(cleaned_schemas, merged_defs)
+      result = _build_compact_schema(cleaned_schemas, merged_defs)
+    else:
+      result = {"anyOf": cleaned_schemas}
+      if merged_defs:
+        result["$defs"] = merged_defs
 
-    result = {"anyOf": cleaned_schemas}
-    if merged_defs:
-      result["$defs"] = merged_defs
+    if not descriptions:
+      result = _strip_descriptions(result)
+
+    if cache:
+      schema_cache[cache_key] = result
     return result
 
   @staticmethod
