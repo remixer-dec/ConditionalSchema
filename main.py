@@ -1192,9 +1192,7 @@ def _build_compact_schema(variant_schemas: List[Dict[str, Any]], merged_defs: Di
   # Find properties whose schema is identical in every variant
   first_props = variant_schemas[0].get("properties", {})
   common_props = {
-    key: val
-    for key, val in first_props.items()
-    if all(s.get("properties", {}).get(key) == val for s in variant_schemas[1:])
+    key: val for key, val in first_props.items() if all(s.get("properties", {}).get(key) == val for s in variant_schemas[1:])
   }
 
   if not common_props:
@@ -1236,6 +1234,7 @@ def _get_control_values(
   control_fields: FrozenSet[str],
   annotations: Dict[str, Type],
   conditional_fields: Dict[str, ConditionalFieldInfo],
+  bind_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Tuple[Any, ...]]:
   """
   Determine possible values for each control field.
@@ -1244,6 +1243,10 @@ def _get_control_values(
   control_values: Dict[str, Tuple[Any, ...]] = {}
 
   for cf_name in control_fields:
+    # Check bind_ctx override first inside the existing iteration
+    if bind_ctx and cf_name in bind_ctx and bind_ctx[cf_name] is not None:
+      control_values[cf_name] = (bind_ctx[cf_name],)
+      continue
     if cf_name in annotations:
       ann = annotations[cf_name]
       origin = get_origin(ann)
@@ -1384,6 +1387,7 @@ class ConditionalModelMeta(type(BaseModel)):
     regular_fields: Dict[str, Tuple[Type, Any]],
     conditional_fields: Dict[str, ConditionalFieldInfo],
     annotations: Dict[str, Type],
+    bind_ctx: Optional[Dict[str, Any]] = None,
   ) -> List[Type[BaseModel]]:
     """Generate all variant models based on control field combinations."""
 
@@ -1398,10 +1402,19 @@ class ConditionalModelMeta(type(BaseModel)):
             continue
         control_fields.add(dep_field)
 
+    # Allow schema matching bind-time properties to become hard-controlled fields
+    # Utilizing a generator to update set runs natively in C, avoiding python loop overhead
+    if bind_ctx:
+      control_fields.update(
+        k
+        for k, v in bind_ctx.items()
+        if v is not None and k in annotations and (isinstance(v, (str, int, bool, bytes)) or hasattr(type(v), "__members__"))
+      )
+
     control_fields_frozen = frozenset(control_fields)
 
-    # Get possible values for each control field
-    control_values = _get_control_values(control_fields_frozen, annotations, conditional_fields)
+    # Get possible values for each control field (bind_ctx directly hooks to mapping during iteration)
+    control_values = _get_control_values(control_fields_frozen, annotations, conditional_fields, bind_ctx)
 
     # Generate all combinations
     combos = _generate_combos(list(control_fields), control_values)
@@ -1565,12 +1578,13 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     # Resolve templates and evaluate bound conditions
     resolved = {name: cf.resolve_templates(ctx) for name, cf in cfields.items()}
 
-    # Generate variants with resolved fields
+    # Generate variants with resolved fields & constrained conditional logic
     variants = ConditionalModelMeta._generate_variants(
       cls.__name__,
       rfields,
       resolved,
       annots,
+      bind_ctx=ctx,
     )
 
     # Build namespace for the bound model so Pydantic populates model_fields
@@ -1614,7 +1628,9 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     return Union[tuple(variants)]
 
   @classmethod
-  def json_schema(cls, by_alias: bool = False, compact: bool = False, descriptions: bool = True, cache: bool = False) -> Dict[str, Any]:
+  def json_schema(
+    cls, by_alias: bool = False, compact: bool = False, descriptions: bool = True, cache: bool = False
+  ) -> Dict[str, Any]:
     """
     Get the JSON schema for this model.
 
