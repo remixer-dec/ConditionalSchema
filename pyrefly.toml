@@ -1,0 +1,2 @@
+infer-with-first-use = false
+project-includes = ["./"]
