@@ -24,7 +24,8 @@
 | `.bind(**ctx)` | Resolve templates and bind-time conditions |
 | `._get_variants()` | Get list of variant models (internal use) |
 | `._as_union()` | Get Union type of all variants (internal use) |
-| `.json_schema(by_alias=False)` | Get JSON schema (with anyOf if multiple variants) |
+| `.json_schema(by_alias=False, compact=False, descriptions=True, cache=False)` | Get JSON schema (with `anyOf` if multiple variants) and control schema size, descriptions, and caching |
+| `.propdoc(by_alias=False, lazy=True, mention_depends=False, mention_options=False)` | Get compact property documentation, including nested model fields |
 
 ### Condition Helpers
 
@@ -57,6 +58,25 @@ action: str = CField(
     when_truthy=["mode"]
 )
 ```
+
+Bind-time templates can also be used in field aliases, descriptions, patterns, and enum values. These values are resolved by `ConditionalModel.bind(**context)` before the bound schema is generated.
+
+### JSON Schema Output Options
+
+`ConditionalModel.json_schema()` supports additional output controls:
+
+```python
+# Extract properties shared by every variant into $defs/Base.
+schema = BoundForm.json_schema(compact=True)
+
+# Omit descriptions recursively for a smaller schema.
+schema = BoundForm.json_schema(descriptions=False)
+
+# Reuse the generated result when the same bound class is queried repeatedly.
+schema = BoundForm.json_schema(cache=True)
+```
+
+`compact=True` is most useful for models with multiple variants. The compact form uses `allOf` references to share common properties. Cache keys include `by_alias`, `compact`, and `descriptions`.
 
 ### Cliteral Modes
 
@@ -129,6 +149,7 @@ schema = BoundForm.json_schema()
 | `item_schema` | `Type[BaseModel]` | Schema for each property's value |
 | `use_alias` | `bool` | Use field alias for key lookup (default: False) |
 | `required` | `bool` | Make all properties required (default: True) |
+| `flatten` | `bool` | If the item model has one field, use that field's schema directly for each record value (default: False) |
 | `additional_properties` | `bool` | Allow additional properties (default: False) |
 
 **Key extraction modes:**
@@ -141,4 +162,31 @@ CRecord(data, key_field="item_name", use_alias=True, ...)
 
 # Custom callable
 CRecord(data, key_field=lambda item: item["name"].lower(), ...)
+```
+
+**Flattening single-field item models:**
+
+```python
+class SettingValue(BaseModel):
+    value: int
+
+record = CRecord(
+    data=[{"name": "retries"}],
+    key_field="name",
+    item_schema=SettingValue,
+    flatten=True,
+)
+
+# Each record property uses the integer schema directly rather than
+# requiring {"value": ...}.
+```
+
+The same `flatten` option is available on `Crecord(...)` for bind-time records.
+
+### Property Documentation
+
+`propdoc()` produces a compact text representation of the active properties. It can use aliases, include condition descriptions, and show Literal or enum options with `mention_options=True`. Nested `BaseModel` fields are listed once below the parent properties; dynamic record item models are labeled as record values.
+
+```python
+print(BoundForm.propdoc(by_alias=True, mention_depends=True, mention_options=True))
 ```
