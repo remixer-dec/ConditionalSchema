@@ -122,7 +122,7 @@ class ConditionalFieldInfo:
         when_falsy: Optional[List[str]] = None,
         when_unbound: Optional[List[str]] = None,
         default: Any = ...,
-        alias: Optional[str] = None,
+        alias: Optional[Union[str, Template]] = None,
         description: Optional[Union[str, Template]] = None,
         pattern: Optional[Union[str, Template]] = None,
         enum: Optional[Union[List, Template]] = None,
@@ -266,10 +266,14 @@ class ConditionalFieldInfo:
             or self.when_bound
             or isinstance(self.field_type, LiteralTemplate)
             or isinstance(self.field_type, CSRecordTemplate)
+            or (isinstance(self.alias, str) and "{" in self.alias)
+            or (isinstance(self.description, str) and "{" in self.description)
+            or (isinstance(self.pattern, str) and "{" in self.pattern)
+            or (isinstance(self.enum, list) and any(isinstance(value, str) and "{" in value for value in self.enum))
+            or isinstance(self.alias, Template)
+            or isinstance(self.description, Template)
             or isinstance(self.pattern, Template)
             or isinstance(self.enum, Template)
-            or isinstance(self.description, Template)
-            or isinstance(self.alias, Template)
             or (
                 get_origin(self.field_type) is Literal
                 and any(isinstance(a, str) and _has_implicit_literal_template(a) for a in get_args(self.field_type))
@@ -282,6 +286,10 @@ class ConditionalFieldInfo:
         def resolve(val: Any) -> Any:
             if isinstance(val, Template):
                 return val.resolve(ctx)
+            if isinstance(val, str) and "{" in val:
+                return val.format(**ctx)
+            if isinstance(val, list):
+                return [resolve(value) for value in val]
             return val
 
         # Resolve field type
@@ -406,7 +414,7 @@ def CSField(
     when_falsy: Optional[List[str]] = None,
     when_unbound: Optional[List[str]] = None,
     default: Any = ...,
-    alias: Optional[str] = None,
+    alias: Optional[Union[str, Template]] = None,
     description: Optional[Union[str, Template]] = None,
     pattern: Optional[Union[str, Template]] = None,
     enum: Optional[Union[List, Template]] = None,
@@ -424,7 +432,7 @@ def CSField(
     when_falsy: Optional[List[str]] = None,
     when_unbound: Optional[List[str]] = None,
     default: Any = ...,
-    alias: Optional[str] = None,
+    alias: Optional[Union[str, Template]] = None,
     description: Optional[Union[str, Template]] = None,
     pattern: Optional[Union[str, Template]] = None,
     enum: Optional[Union[List, Template]] = None,
@@ -442,7 +450,7 @@ def CSField(
     when_falsy: Optional[List[str]] = None,
     when_unbound: Optional[List[str]] = None,
     default: Any = ...,
-    alias: Optional[str] = None,
+    alias: Optional[Union[str, Template]] = None,
     description: Optional[Union[str, Template]] = None,
     pattern: Optional[Union[str, Template]] = None,
     enum: Optional[Union[List, Template]] = None,
@@ -460,9 +468,9 @@ def CSField(
         when_falsy: Context keys that must be present and falsy.
         when_unbound: Context keys that must be absent.
         default: Value used when the field is active.
-        alias: Schema property alias; conditions always use field names.
-        description: Static or explicit ``CStemplate`` description.
-        pattern: Static or explicit ``CStemplate`` regex pattern.
+        alias: Schema property alias; a value containing ``{`` is resolved at bind time.
+        description: Field description; a value containing ``{`` is resolved at bind time.
+        pattern: Regex pattern; a value containing ``{`` is resolved at bind time.
         enum: Values enforced as a Literal and emitted in the schema.
         **field_kwargs: Additional Pydantic ``Field`` arguments.
 
@@ -596,7 +604,11 @@ class ConditionalModelMeta(type(BaseModel)):
                 # Conditional fields are optional placeholders on the base class. The
                 # generated variants restore the real default and requiredness.
                 extra = dict(field_value.field_kwargs)
-                if field_value.pattern is not None and not isinstance(field_value.pattern, Template):
+                if (
+                    field_value.pattern is not None
+                    and not isinstance(field_value.pattern, Template)
+                    and not (isinstance(field_value.pattern, str) and "{" in field_value.pattern)
+                ):
                     extra["pattern"] = field_value.pattern
                 namespace[field_name] = Field(
                     default=(
@@ -604,8 +616,16 @@ class ConditionalModelMeta(type(BaseModel)):
                         if not field_value.when and not field_value.when_any and not field_value.requires_bind
                         else None
                     ),
-                    alias=field_value.alias if isinstance(field_value.alias, str) else None,
-                    description=field_value.description if not isinstance(field_value.description, Template) else None,
+                    alias=(
+                        field_value.alias
+                        if isinstance(field_value.alias, str) and "{" not in field_value.alias
+                        else None
+                    ),
+                    description=(
+                        field_value.description
+                        if isinstance(field_value.description, str) and "{" not in field_value.description
+                        else None
+                    ),
                     **extra,
                 )
 

@@ -266,12 +266,33 @@ def test_description_stripping_reuses_unchanged_schema_containers():
     assert "description" not in stripped["properties"]["value"]
 
 
-def test_literal_braces_and_regex_quantifiers_are_not_implicit_templates():
+def test_plain_string_templates_are_resolved_at_bind_time():
+    class Form(ConditionalModel):
+        text: str = CSField(
+            alias="msg_{language}",
+            description="Hello {user_name}",
+            enum=["{language}"],
+        )
+        code: str = CSField(pattern="^{language}$")
+
+    bound = Form.bind(user_name="Alice", language="English")
+
+    assert bound.model_fields["text"].description == "Hello Alice"
+    assert bound.model_fields["text"].alias == "msg_English"
+    schema = bound.json_schema(by_alias=True)
+    assert schema["properties"]["msg_English"]["description"] == "Hello Alice"
+    assert schema["properties"]["msg_English"]["const"] == "English"
+    assert schema["properties"]["code"]["pattern"] == "^English$"
+    assert bound.model_validate({"msg_English": "English", "code": "English"}).text == "English"
+    assert bound.propdoc(by_alias=True, lazy=False) == "msg_English: Hello Alice\ncode"
+
+
+def test_escaped_braces_remain_literal_in_implicit_templates():
     class Form(ConditionalModel):
         include: bool
         text: str = CSField(
-            description='Example JSON: {"key": 1}',
-            pattern=r"^[A-Z]{2}$",
+            description='Example JSON: {{"key": 1}}',
+            pattern=r"^[A-Z]{{2}}$",
             when_truthy=["include"],
         )
 
