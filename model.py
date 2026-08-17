@@ -10,20 +10,24 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import warnings
 from enum import Enum
 from typing import (
     Any,
+    ClassVar,
     Dict,
     FrozenSet,
     Iterator,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Set,
     Tuple,
     Type,
     Union,
+    cast,
     get_args,
     get_origin,
     overload,
@@ -77,6 +81,55 @@ _MAX_VARIANTS_FOR_UNION = 256
 _BOUND_CACHE_LIMIT = 64
 _NESTED_MODEL_CACHE_LIMIT = 256
 _NESTED_MODEL_CACHE: Dict[Any, FrozenSet[Type[BaseModel]]] = {}
+_JSON_STRING_BOUNDARY_CHARS = frozenset({'"', "]", "}"})
+_JSON_STRING_PATTERN_EXAMPLE = r'^[^"\]}]+$'
+
+
+def _has_json_string_boundary_guard(pattern: str) -> bool:
+    """Return whether a negated character class excludes JSON boundary characters."""
+    index = 0
+    while index < len(pattern):
+        if pattern[index] == "\\":
+            index += 2
+            continue
+        if pattern[index] != "[" or index + 1 >= len(pattern) or pattern[index + 1] != "^":
+            index += 1
+            continue
+
+        index += 2
+        excluded: Set[str] = set()
+        first_character = True
+        while index < len(pattern):
+            character = pattern[index]
+            if character == "\\":
+                index += 1
+                if index < len(pattern):
+                    excluded.add(pattern[index])
+                    index += 1
+                first_character = False
+                continue
+            if character == "]" and not first_character:
+                if _JSON_STRING_BOUNDARY_CHARS.issubset(excluded):
+                    return True
+                index += 1
+                break
+            excluded.add(character)
+            index += 1
+            first_character = False
+    return False
+
+
+def _warn_if_pattern_can_end_json(pattern: str) -> None:
+    """Warn when a pattern lacks the JSON boundary guard used for guided generation."""
+    if _has_json_string_boundary_guard(pattern):
+        return
+    warnings.warn(
+        "pattern does not exclude all of '\"', ']', and '}'. In JSON-guided generation, "
+        f"use a negative character class such as r'{_JSON_STRING_PATTERN_EXAMPLE}' "
+        "to prevent a match from ending the JSON value early.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def _variant_name_suffix(active_combo: Dict[str, Any]) -> str:
@@ -114,7 +167,7 @@ class ConditionalFieldInfo:
 
     def __init__(
         self,
-        field_type: Union[Type[Any], LiteralTemplate, CSRecordTemplate, None] = None,
+        field_type: Any = None,
         when: Optional[Dict[str, Any]] = None,
         when_any: Optional[List[Dict[str, Any]]] = None,
         when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
@@ -128,13 +181,15 @@ class ConditionalFieldInfo:
         enum: Optional[Union[List, Template]] = None,
         **field_kwargs: Any,
     ):
-        self.field_type = field_type
+        self.field_type: Any = field_type
         self.when = when or {}
         self.when_any = when_any
         self.default = default
         self.alias = alias
         self.description = description
         self.pattern = pattern
+        if isinstance(pattern, str):
+            _warn_if_pattern_can_end_json(pattern)
         self.enum = enum
         self.field_kwargs = field_kwargs
         self.bound_active_result = True
@@ -268,7 +323,6 @@ class ConditionalFieldInfo:
             or isinstance(self.field_type, CSRecordTemplate)
             or (isinstance(self.alias, str) and "{" in self.alias)
             or (isinstance(self.description, str) and "{" in self.description)
-            or (isinstance(self.pattern, str) and "{" in self.pattern)
             or (isinstance(self.enum, list) and any(isinstance(value, str) and "{" in value for value in self.enum))
             or isinstance(self.alias, Template)
             or isinstance(self.description, Template)
@@ -314,6 +368,10 @@ class ConditionalFieldInfo:
 
         bound_active = self.evaluate_bound(ctx)
 
+        resolved_pattern = self.pattern if isinstance(self.pattern, str) else resolve(self.pattern)
+        if isinstance(resolved_pattern, str) and isinstance(self.pattern, Template):
+            _warn_if_pattern_can_end_json(resolved_pattern)
+
         result = ConditionalFieldInfo(
             field_type=resolved_type,
             when=self.when,
@@ -325,31 +383,32 @@ class ConditionalFieldInfo:
             default=self.default,
             alias=resolve(self.alias),
             description=resolve(self.description),
-            pattern=resolve(self.pattern),
+            pattern=resolved_pattern,
             enum=resolve(self.enum),
             **self.field_kwargs,
         )
         result.bound_active_result = bound_active
         return result
 
-    def make_field_info(self) -> Tuple[Type, FieldInfo]:
+    def make_field_info(self) -> Tuple[Any, FieldInfo]:
         """Create Pydantic field info for an active field."""
         extra = dict(self.field_kwargs)
         field_type = self.field_type
 
-        if self.pattern:
+        if isinstance(self.pattern, str):
             extra["pattern"] = self.pattern
-        if self.enum is not None:
-            if not self.enum:
+        enum_values = self.enum if isinstance(self.enum, list) else None
+        if enum_values is not None:
+            if not enum_values:
                 raise ValueError("enum must contain at least one value")
-            field_type = Literal[tuple(self.enum)]
+            field_type = Literal[tuple(enum_values)]
 
         return (
             field_type,
             Field(
                 default=self.default,
-                alias=self.alias,
-                description=self.description,
+                alias=self.alias if isinstance(self.alias, str) else None,
+                description=self.description if isinstance(self.description, str) else None,
                 **extra,
             ),
         )
@@ -363,9 +422,9 @@ class _ConditionIndex:
     def __init__(
         self,
         control_fields: Sequence[str],
-        dependents: Dict[str, Sequence[str]],
+        dependents: Mapping[str, Sequence[str]],
         dependency_order: Sequence[str],
-        condition_values: Dict[str, Sequence[Any]],
+        condition_values: Mapping[str, Sequence[Any]],
     ):
         self.control_fields = tuple(control_fields)
         self.dependents = {name: tuple(values) for name, values in dependents.items()}
@@ -470,7 +529,7 @@ def CSField(
         default: Value used when the field is active.
         alias: Schema property alias; a value containing ``{`` is resolved at bind time.
         description: Field description; a value containing ``{`` is resolved at bind time.
-        pattern: Regex pattern; a value containing ``{`` is resolved at bind time.
+        pattern: Static regex pattern or a ``CStemplate`` resolved at bind time.
         enum: Values enforced as a Literal and emitted in the schema.
         **field_kwargs: Additional Pydantic ``Field`` arguments.
 
@@ -604,11 +663,7 @@ class ConditionalModelMeta(type(BaseModel)):
                 # Conditional fields are optional placeholders on the base class. The
                 # generated variants restore the real default and requiredness.
                 extra = dict(field_value.field_kwargs)
-                if (
-                    field_value.pattern is not None
-                    and not isinstance(field_value.pattern, Template)
-                    and not (isinstance(field_value.pattern, str) and "{" in field_value.pattern)
-                ):
+                if field_value.pattern is not None and not isinstance(field_value.pattern, Template):
                     extra["pattern"] = field_value.pattern
                 namespace[field_name] = Field(
                     default=(
@@ -616,11 +671,7 @@ class ConditionalModelMeta(type(BaseModel)):
                         if not field_value.when and not field_value.when_any and not field_value.requires_bind
                         else None
                     ),
-                    alias=(
-                        field_value.alias
-                        if isinstance(field_value.alias, str) and "{" not in field_value.alias
-                        else None
-                    ),
+                    alias=(field_value.alias if isinstance(field_value.alias, str) and "{" not in field_value.alias else None),
                     description=(
                         field_value.description
                         if isinstance(field_value.description, str) and "{" not in field_value.description
@@ -891,11 +942,14 @@ class ConditionalModelMeta(type(BaseModel)):
             active_combo = {field_name: combo[field_name] for field_name, _, _ in active_controller_values}
             suffix = _variant_name_suffix(active_combo)
 
-            variant = create_model(
-                f"{name}_{suffix}",
-                __base__=base_model or BaseModel,
-                __cls_kwargs__={_GENERATED_CLASS_MARKER: True},
-                **variant_fields,
+            variant = cast(
+                Type[BaseModel],
+                cast(Any, create_model)(
+                    f"{name}_{suffix}",
+                    __base__=base_model or BaseModel,
+                    __cls_kwargs__={_GENERATED_CLASS_MARKER: True},
+                    **variant_fields,
+                ),
             )
             expected_fields = set(variant_fields)
             for field_name in list(variant.model_fields):
@@ -913,6 +967,18 @@ class ConditionalModelMeta(type(BaseModel)):
 
 class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
     """Base class for models whose fields can be conditional at runtime or bind time."""
+
+    __cfields__: ClassVar[Dict[str, ConditionalFieldInfo]]
+    __rfields__: ClassVar[Dict[str, Tuple[Any, Any]]]
+    __annots__: ClassVar[Dict[str, Any]]
+    __needs_bind__: ClassVar[bool]
+    __variants__: ClassVar[Optional[List[Type[BaseModel]]]]
+    __condition_index__: ClassVar[_ConditionIndex]
+    __active_fields__: ClassVar[Optional[FrozenSet[str]]]
+    __bind_ctx__: ClassVar[Dict[str, Any]]
+    __bound_cache__: ClassVar[Dict[Tuple[Tuple[str, Type[Any], Any], ...], Type["ConditionalModel"]]]
+    __schema_cache__: ClassVar[Dict[Tuple[bool, bool, bool], Dict[str, Any]]]
+    __propdoc_cache__: ClassVar[Dict[Tuple[bool, bool, bool, bool], str]]
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -1029,7 +1095,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         # Create a subclass of the user's model so methods, validators, and config
         # remain available on the bound class.
         namespace[_GENERATED_CLASS_MARKER] = True
-        new_cls = ConditionalModelMeta(f"{cls.__name__}_Bound", (cls,), namespace)
+        new_cls = cast(Type["ConditionalModel"], cast(Any, ConditionalModelMeta)(f"{cls.__name__}_Bound", (cls,), namespace))
         expected_fields = set(namespace["__annotations__"])
         for field_name in list(new_cls.model_fields):
             if field_name not in expected_fields:
@@ -1116,7 +1182,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         return count
 
     @classmethod
-    def _as_union(cls) -> Type:
+    def _as_union(cls) -> Any:
         """Get the model as a Union type of all variants (internal use)."""
         if cls._estimate_variant_count() > _MAX_VARIANTS_FOR_UNION:
             raise ValueError(
@@ -1168,8 +1234,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
                 "Call .bind() first to resolve them."
             )
 
+        cache_key = (by_alias, compact, descriptions)
         if cache:
-            cache_key = (by_alias, compact, descriptions)
             schema_cache = cls.__dict__.get("__schema_cache__")
             if schema_cache is None:
                 schema_cache = {}
@@ -1195,8 +1261,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
             return result
 
         # Merge variant definitions as each schema is produced.
-        merged_defs = {}
-        cleaned_schemas = []
+        merged_defs: Dict[str, Any] = {}
+        cleaned_schemas: List[Dict[str, Any]] = []
 
         for variant_index, variant in enumerate(variants):
             schema = variant.model_json_schema(by_alias=by_alias)
@@ -1205,7 +1271,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         if compact:
             result = _build_compact_schema(cleaned_schemas, merged_defs)
         else:
-            result = {"anyOf": cleaned_schemas}
+            result: Dict[str, Any] = {"anyOf": cleaned_schemas}
             if merged_defs:
                 result["$defs"] = merged_defs
 
@@ -1439,6 +1505,8 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         if enum_values:
             for option in enum_values:
                 add_option(option)
+        elif field_type is bool:
+            return "(true or false)"
         elif field_type is not None:
             origin = get_origin(field_type)
             if origin is Literal:

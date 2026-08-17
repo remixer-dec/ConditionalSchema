@@ -1,4 +1,5 @@
 import inspect
+import warnings
 from typing import Any, Literal, get_args, get_type_hints
 
 import pytest
@@ -273,9 +274,10 @@ def test_plain_string_templates_are_resolved_at_bind_time():
             description="Hello {user_name}",
             enum=["{language}"],
         )
-        code: str = CSField(pattern="^{language}$")
+        code: str = CSField(pattern=CStemplate("^{language}$"))
 
-    bound = Form.bind(user_name="Alice", language="English")
+    with pytest.warns(UserWarning, match="does not exclude"):
+        bound = Form.bind(user_name="Alice", language="English")
 
     assert bound.model_fields["text"].description == "Hello Alice"
     assert bound.model_fields["text"].alias == "msg_English"
@@ -287,18 +289,38 @@ def test_plain_string_templates_are_resolved_at_bind_time():
     assert bound.propdoc(by_alias=True, lazy=False) == "msg_English: Hello Alice\ncode"
 
 
+def test_plain_patterns_keep_regex_braces_without_binding():
+    with pytest.warns(UserWarning, match="does not exclude"):
+
+        class Form(ConditionalModel):
+            text: str = CSField(pattern=r"^[A-Z]{2,5}$")
+
+    schema = Form.json_schema()
+    assert schema["properties"]["text"]["pattern"] == r"^[A-Z]{2,5}$"
+    assert Form.model_validate({"text": "AB"}).text == "AB"
+    with pytest.raises(ValidationError):
+        Form.model_validate({"text": "A"})
+
+
+def test_patterns_that_exclude_json_boundaries_do_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+
+        class Form(ConditionalModel):
+            text: str = CSField(pattern=r'^[^"\]}]+$')
+
+    assert Form.model_validate({"text": "safe text"}).text == "safe text"
+    with pytest.raises(ValidationError):
+        Form.model_validate({"text": 'not " safe'})
+
+
 def test_escaped_braces_remain_literal_in_implicit_templates():
     class Form(ConditionalModel):
-        include: bool
-        text: str = CSField(
-            description='Example JSON: {{"key": 1}}',
-            pattern=r"^[A-Z]{{2}}$",
-            when_truthy=["include"],
-        )
+        text: str = CSField(description='Example JSON: {{"key": 1}}')
 
-    schema = Form.bind(include=True).json_schema()
-    assert schema["properties"]["text"]["description"] == 'Example JSON: {"key": 1}'
-    assert schema["properties"]["text"]["pattern"] == r"^[A-Z]{2}$"
+    bound = Form.bind()
+
+    assert bound.model_fields["text"].description == 'Example JSON: {"key": 1}'
 
 
 def test_unknown_and_cyclic_dependencies_are_rejected():
@@ -708,6 +730,13 @@ def test_propdoc_options_preserve_order_for_mixed_values():
     options = ConditionalModel._get_options_text(literal, None)
 
     assert options == "(Choose one: 1, one, False)"
+
+
+def test_propdoc_mentions_boolean_options():
+    class Form(ConditionalModel):
+        include: bool = CSField(alias="include")
+
+    assert Form.propdoc(by_alias=True, mention_options=True) == "include (true or false)"
 
 
 def test_nested_propdoc_context_default_is_none():

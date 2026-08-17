@@ -101,8 +101,7 @@ def _merge_variant_schema_definitions(
     def contains_local_ref(value: Any) -> bool:
         if isinstance(value, dict):
             return any(
-                (key == "$ref" and isinstance(item, str) and item.startswith("#/$defs/"))
-                or contains_local_ref(item)
+                (key == "$ref" and isinstance(item, str) and item.startswith("#/$defs/")) or contains_local_ref(item)
                 for key, item in value.items()
             )
         if isinstance(value, list):

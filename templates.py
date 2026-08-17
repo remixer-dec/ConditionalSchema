@@ -1,7 +1,7 @@
 """Template and state-dependent Literal helpers."""
 
 import string
-from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union, overload
+from typing import Any, Callable, Dict, List, Literal, Optional, Union, overload
 
 
 def _has_implicit_literal_template(value: str) -> bool:
@@ -72,8 +72,8 @@ class LiteralTemplate:
         if_false: Optional[List[Any]] = None,
     ):
         self.key = key
-        if callable(mapping_or_condition) and not isinstance(mapping_or_condition, dict):
-            self.mapping = None
+        if callable(mapping_or_condition):
+            self.mapping: Optional[Dict[Any, List[Any]]] = None
             self.default = None
             self.condition = mapping_or_condition
             self.if_true = default_or_if_true
@@ -85,7 +85,7 @@ class LiteralTemplate:
             self.if_true = None
             self.if_false = None
 
-    def resolve(self, ctx: Dict[str, Any]) -> Type:
+    def resolve(self, ctx: Dict[str, Any]) -> Any:
         """Resolve to a ``typing.Literal`` type based on context.
 
         Raises:
@@ -98,11 +98,14 @@ class LiteralTemplate:
             if options is None:
                 raise ValueError(f"CSliteral condition returned {condition_result}, but corresponding options list is None")
         else:
-            options = self.mapping.get(value, self.default)
+            mapping = self.mapping
+            if mapping is None:
+                raise ValueError("CSliteral has no mapping")
+            options = mapping.get(value, self.default)
             if options is None:
                 raise ValueError(
                     f"No Literal options defined for {self.key}={value!r} and no default provided. "
-                    f"Available keys: {list(self.mapping.keys())}"
+                    f"Available keys: {list(mapping.keys())}"
                 )
 
         if not options:
@@ -120,15 +123,24 @@ class LiteralTemplate:
 
 
 @overload
-def CSliteral(key: str, mapping: Dict[Any, List[Any]], default: Optional[List[Any]] = None) -> LiteralTemplate: ...
+def CSliteral(
+    key: str,
+    mapping_or_condition: Dict[Any, List[Any]],
+    default_or_if_true: Optional[List[Any]] = None,
+    if_false: Optional[List[Any]] = None,
+    *,
+    if_true: Optional[List[Any]] = None,
+) -> LiteralTemplate: ...
 
 
 @overload
 def CSliteral(
     key: str,
-    condition: Callable[[Any], bool],
-    if_true: List[Any],
-    if_false: List[Any],
+    mapping_or_condition: Callable[[Any], bool],
+    default_or_if_true: Optional[List[Any]] = None,
+    if_false: Optional[List[Any]] = None,
+    *,
+    if_true: Optional[List[Any]] = None,
 ) -> LiteralTemplate: ...
 
 

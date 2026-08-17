@@ -16,7 +16,7 @@ type = ["pyrefly>=0.18"]
 dev = ["pytest>=8,<9", "ruff>=0.6,<1", "pyrefly>=0.18"]
 
 [tool.setuptools]
-py-modules = ["main", "model", "conditions", "templates", "records", "schema"]
+py-modules = ["main", "model", "conditions", "templates", "records", "schema", "compat"]
 
 [tool.pytest.ini_options]
 testpaths = ["test_crecord.py", "test_report_issues.py"]
@@ -41,3 +41,7 @@ select = [
     "RUF006",
     "ASYNC",
 ]
+
+[tool.pyright]
+include = ["main.py", "model.py", "conditions.py", "templates.py", "records.py", "schema.py", "compat.py"]
+pythonVersion = "3.10"

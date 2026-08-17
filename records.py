@@ -1,7 +1,7 @@
 """Runtime record schema helpers."""
 
 import copy
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union, cast
 
 from pydantic import BaseModel, ConfigDict, create_model
 
@@ -93,7 +93,8 @@ class CSRecord:
     def _extract_key(self, item: Dict[str, Any]) -> Any:
         if callable(self._key_field):
             return self._key_field(item)
-        return item.get(self._get_lookup_key())
+        lookup_key = self._get_lookup_key()
+        return item.get(lookup_key) if lookup_key is not None else None
 
     def _build_data_map(self) -> Dict[str, Dict[str, Any]]:
         if self._data_map is not None:
@@ -134,7 +135,7 @@ class CSRecord:
             return self._model
 
         data_map = self._build_data_map()
-        fields: Dict[str, tuple[Type, Any]] = {}
+        fields: Dict[str, tuple[Any, Any]] = {}
         fields_info = self._item_schema.model_fields
         single_field = self._flatten and len(fields_info) == 1
         single_field_info = next(iter(fields_info.values())) if single_field else None
@@ -160,10 +161,11 @@ class CSRecord:
                 fields[key] = (field_value_type, default)
 
         config = ConfigDict(extra="allow" if self._additional_properties else "forbid")
-        self._model = create_model("DynamicRecord", __config__=config, **fields)
-        type.__setattr__(self._model, "__conditional_dynamic_record__", True)
-        type.__setattr__(self._model, "__crecord_item_schema__", self._item_schema)
-        return self._model
+        model = cast(Type[BaseModel], cast(Any, create_model)("DynamicRecord", __config__=config, **fields))
+        type.__setattr__(model, "__conditional_dynamic_record__", True)
+        type.__setattr__(model, "__crecord_item_schema__", self._item_schema)
+        self._model = model
+        return model
 
     def json_schema(self, by_alias: bool = False) -> Dict[str, Any]:
         """Return the dynamic schema with one root item definition.
@@ -255,7 +257,7 @@ class CSRecordTemplate:
     def item_schema(self) -> Type[BaseModel]:
         return self._item_schema
 
-    def resolve(self, ctx: Dict[str, Any]) -> Type[BaseModel]:
+    def resolve(self, ctx: Dict[str, Any]) -> Any:
         """Build the dynamic model from ``ctx[data_key]``.
 
         Missing data resolves to ``dict``. Invalid present data raises the same

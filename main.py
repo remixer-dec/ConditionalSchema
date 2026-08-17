@@ -34,4 +34,24 @@ _merge_variant_schema_definitions = _model._merge_variant_schema_definitions
 _schema_fingerprint = _model._schema_fingerprint
 _strip_descriptions = _model._strip_descriptions
 
-__all__ = list(_model.__all__)
+__all__ = [
+    "CSYesNo",
+    "any_of",
+    "none_of",
+    "truthy",
+    "TRUTHY",
+    "FALSY",
+    "UNBOUND",
+    "CStemplate",
+    "CSliteral",
+    "CSrecord",
+    "CSField",
+    "ConditionalModel",
+    "Template",
+    "LiteralTemplate",
+    "CSRecord",
+    "CSRecordTemplate",
+    "AnyOf",
+    "NoneOf",
+    "ConditionalFieldInfo",
+]
