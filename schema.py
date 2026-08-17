@@ -1,4 +1,4 @@
-"""Schema transformation helpers used by ConditionalModel and CRecord."""
+"""Schema transformation helpers used by ConditionalModel and CSRecord."""
 
 import copy
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Type

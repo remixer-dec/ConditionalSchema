@@ -1,10 +1,10 @@
-"""Tests for CRecord functionality."""
+"""Tests for CSRecord functionality."""
 
 from pydantic import BaseModel, Field
 from main import (
-    CRecord,
-    Crecord,
-    CField,
+    CSRecord,
+    CSrecord,
+    CSField,
     ConditionalModel,
 )
 
@@ -42,8 +42,8 @@ old_armor_with_alias = [
 
 
 def test_crecord_list_input():
-    """Test CRecord with list of dicts input."""
-    record = CRecord(
+    """Test CSRecord with list of dicts input."""
+    record = CSRecord(
         data=old_armor_list,
         key_field="armor_item_name",
         item_schema=UpdatableArmorItemModel,
@@ -66,8 +66,8 @@ def test_crecord_list_input():
 
 
 def test_crecord_dict_input():
-    """Test CRecord with dict of dicts input."""
-    record = CRecord(
+    """Test CSRecord with dict of dicts input."""
+    record = CSRecord(
         data=old_armor_dict,
         key_field="armor_item_name",  # Not used for dict input
         item_schema=UpdatableArmorItemModel,
@@ -82,8 +82,8 @@ def test_crecord_dict_input():
 
 
 def test_crecord_with_alias():
-    """Test CRecord with alias-based key extraction."""
-    record = CRecord(
+    """Test CSRecord with alias-based key extraction."""
+    record = CSRecord(
         data=old_armor_with_alias,
         key_field="armor_item_name",
         item_schema=ArmorItemModel,
@@ -96,8 +96,8 @@ def test_crecord_with_alias():
 
 
 def test_crecord_with_callable():
-    """Test CRecord with callable key extraction."""
-    record = CRecord(
+    """Test CSRecord with callable key extraction."""
+    record = CSRecord(
         data=old_armor_list,
         key_field=lambda item: f"item_{item['armor_item_name'].upper()}",
         item_schema=UpdatableArmorItemModel,
@@ -110,8 +110,8 @@ def test_crecord_with_callable():
 
 
 def test_crecord_optional_properties():
-    """Test CRecord with optional (not required) properties."""
-    record = CRecord(
+    """Test CSRecord with optional (not required) properties."""
+    record = CSRecord(
         data=old_armor_list,
         key_field="armor_item_name",
         item_schema=UpdatableArmorItemModel,
@@ -123,8 +123,8 @@ def test_crecord_optional_properties():
 
 
 def test_crecord_model_generation():
-    """Test CRecord model generation."""
-    record = CRecord(
+    """Test CSRecord model generation."""
+    record = CSRecord(
         data=old_armor_list,
         key_field="armor_item_name",
         item_schema=UpdatableArmorItemModel,
@@ -137,12 +137,12 @@ def test_crecord_model_generation():
 
 
 def test_crecord_template_binding():
-    """Test CRecord template binding through ConditionalModel."""
+    """Test CSRecord template binding through ConditionalModel."""
 
     class UpdateArmorForm(ConditionalModel):
         action: str
-        armor_updates: dict = CField(
-            Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
+        armor_updates: dict = CSField(
+            CSrecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
             when_truthy=["armor_data"],
         )
 
@@ -163,12 +163,12 @@ def test_crecord_template_binding():
 
 
 def test_crecord_template_without_data():
-    """Test CRecordTemplate when data is not in context."""
+    """Test CSRecordTemplate when data is not in context."""
 
     class UpdateArmorForm(ConditionalModel):
         action: str
-        armor_updates: dict = CField(
-            Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
+        armor_updates: dict = CSField(
+            CSrecord("armor_data", "armor_item_name", UpdatableArmorItemModel),
             when_truthy=["armor_data"],
         )
 
@@ -182,13 +182,13 @@ def test_crecord_template_without_data():
 
 
 def test_crecord_by_alias_schema():
-    """Test CRecord schema generation with by_alias."""
+    """Test CSRecord schema generation with by_alias."""
 
     class ItemWithAlias(BaseModel):
         item_name: str = Field(alias="itemName")
         value: int = Field(alias="itemValue")
 
-    record = CRecord(
+    record = CSRecord(
         data=[{"name": "sword"}, {"name": "shield"}],
         key_field=lambda item: item["name"],
         item_schema=ItemWithAlias,
@@ -201,8 +201,8 @@ def test_crecord_by_alias_schema():
     schema_with_alias = record.json_schema(by_alias=True)
 
     # Check that item schema reflects alias setting
-    sword_schema_no_alias = schema_no_alias["$defs"]["CRecordItem"]
-    sword_schema_with_alias = schema_with_alias["$defs"]["CRecordItem"]
+    sword_schema_no_alias = schema_no_alias["$defs"]["CSRecordItem"]
+    sword_schema_with_alias = schema_with_alias["$defs"]["CSRecordItem"]
 
     assert sword_schema_no_alias["properties"]["item_name"]["type"] == "string"
     assert sword_schema_with_alias["properties"]["itemName"]["type"] == "string"
@@ -210,12 +210,12 @@ def test_crecord_by_alias_schema():
 
 
 def test_crecord_repr():
-    """Test CRecord and Crecord string representation."""
-    record = CRecord(
+    """Test CSRecord and CSrecord string representation."""
+    record = CSRecord(
         data=old_armor_list,
         key_field="armor_item_name",
         item_schema=UpdatableArmorItemModel,
     )
-    template = Crecord("armor_data", "armor_item_name", UpdatableArmorItemModel)
-    assert repr(record).startswith("CRecord(")
-    assert repr(template).startswith("Crecord(")
+    template = CSrecord("armor_data", "armor_item_name", UpdatableArmorItemModel)
+    assert repr(record).startswith("CSRecord(")
+    assert repr(template).startswith("CSrecord(")

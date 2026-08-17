@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, FrozenSet, Literal, Optional, Tuple
 
-CYesNo = Literal["yes", "no"]
+CSYesNo = Literal["yes", "no"]
 
 
 class AnyOf:
@@ -110,7 +110,7 @@ UNBOUND = _UnboundCheck()
 _MISSING = object()
 
 __all__ = [
-    "CYesNo",
+    "CSYesNo",
     "AnyOf",
     "NoneOf",
     "any_of",

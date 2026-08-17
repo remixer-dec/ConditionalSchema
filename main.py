@@ -1,20 +1,21 @@
-"""Backward-compatible public API for Conditional Schema.
+"""Public API for Conditional Schema.
 
 Implementation details live in focused modules. Existing applications can
-continue importing the original names from ``main``.
+import the public names from ``main``.
 """
 
 import model as _model
 
 AnyOf = _model.AnyOf
-CField = _model.CField
-CRecord = _model.CRecord
-CRecordTemplate = _model.CRecordTemplate
-Ctemplate = _model.Ctemplate
-Cliteral = _model.Cliteral
+CSField = _model.CSField
+CSRecord = _model.CSRecord
+CSRecordTemplate = _model.CSRecordTemplate
+CStemplate = _model.CStemplate
+CSliteral = _model.CSliteral
 ConditionalFieldInfo = _model.ConditionalFieldInfo
 ConditionalModel = _model.ConditionalModel
-Crecord = _model.Crecord
+CSrecord = _model.CSrecord
+CSYesNo = _model.CSYesNo
 FALSY = _model.FALSY
 LiteralTemplate = _model.LiteralTemplate
 NoneOf = _model.NoneOf
@@ -33,9 +34,4 @@ _merge_variant_schema_definitions = _model._merge_variant_schema_definitions
 _schema_fingerprint = _model._schema_fingerprint
 _strip_descriptions = _model._strip_descriptions
 
-c_template = Ctemplate
-c_literal = Cliteral
-c_record = Crecord
-c_field = CField
-
-__all__ = list(_model.__all__) + ["c_template", "c_literal", "c_record", "c_field"]
+__all__ = list(_model.__all__)

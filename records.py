@@ -13,7 +13,7 @@ def _schema_property_name(model: Type[BaseModel], field_name: str, by_alias: boo
     return field_info.alias if field_info and field_info.alias else field_name
 
 
-class CRecord:
+class CSRecord:
     """Create a dynamic object schema whose property names come from runtime data."""
 
     __slots__ = (
@@ -55,19 +55,19 @@ class CRecord:
             ValueError: If a list item has a missing, duplicate, or non-string key.
         """
         if not isinstance(data, (list, dict)):
-            raise TypeError("CRecord data must be a list or dictionary")
+            raise TypeError("CSRecord data must be a list or dictionary")
         if not isinstance(key_field, str) and not callable(key_field):
-            raise TypeError("CRecord key_field must be a string or callable")
+            raise TypeError("CSRecord key_field must be a string or callable")
         if isinstance(data, dict):
             for key, item in data.items():
                 if not isinstance(key, str):
-                    raise TypeError("CRecord dictionary keys must be strings")
+                    raise TypeError("CSRecord dictionary keys must be strings")
                 if not isinstance(item, dict):
-                    raise TypeError("CRecord dictionary values must be dictionaries")
+                    raise TypeError("CSRecord dictionary values must be dictionaries")
         else:
             for item in data:
                 if not isinstance(item, dict):
-                    raise TypeError("CRecord each item must be a dictionary")
+                    raise TypeError("CSRecord each item must be a dictionary")
 
         self._data = copy.deepcopy(data)
         self._key_field = key_field
@@ -106,13 +106,13 @@ class CRecord:
                 try:
                     key = self._extract_key(item)
                 except Exception as exc:
-                    raise ValueError(f"CRecord could not extract a key from item {index}: {exc}") from exc
+                    raise ValueError(f"CSRecord could not extract a key from item {index}: {exc}") from exc
                 if key is None:
-                    raise ValueError(f"CRecord item {index} is missing key {self._key_field!r}")
+                    raise ValueError(f"CSRecord item {index} is missing key {self._key_field!r}")
                 if not isinstance(key, str):
-                    raise ValueError(f"CRecord key from item {index} must be a string, got {type(key).__name__}")
+                    raise ValueError(f"CSRecord key from item {index} must be a string, got {type(key).__name__}")
                 if key in self._data_map:
-                    raise ValueError(f"CRecord has duplicate key {key!r}")
+                    raise ValueError(f"CSRecord has duplicate key {key!r}")
                 self._data_map[key] = item
         return self._data_map
 
@@ -185,7 +185,7 @@ class CRecord:
             item_schema = {key: value for key, value in full_schema.items() if key != "$defs"}
 
         definitions = copy.deepcopy(full_schema.get("$defs", {}))
-        item_definition_name = "CRecordItem"
+        item_definition_name = "CSRecordItem"
         while item_definition_name in definitions:
             item_definition_name += "_"
         definitions[item_definition_name] = item_schema
@@ -201,11 +201,11 @@ class CRecord:
         return schema
 
     def __repr__(self) -> str:
-        return f"CRecord(keys={self.keys!r}, item_schema={self._item_schema.__name__})"
+        return f"CSRecord(keys={self.keys!r}, item_schema={self._item_schema.__name__})"
 
 
-class CRecordTemplate:
-    """Resolve a :class:`CRecord` from one bind-time context value.
+class CSRecordTemplate:
+    """Resolve a :class:`CSRecord` from one bind-time context value.
 
     Args:
         data_key: Context key containing record data.
@@ -245,7 +245,7 @@ class CRecordTemplate:
         self._required = required
         self._flatten = flatten
         self._additional_properties = additional_properties
-        self._resolved_record: Optional[CRecord] = None
+        self._resolved_record: Optional[CSRecord] = None
 
     @property
     def data_key(self) -> str:
@@ -259,12 +259,12 @@ class CRecordTemplate:
         """Build the dynamic model from ``ctx[data_key]``.
 
         Missing data resolves to ``dict``. Invalid present data raises the same
-        ``TypeError`` or ``ValueError`` as :class:`CRecord` construction.
+        ``TypeError`` or ``ValueError`` as :class:`CSRecord` construction.
         """
         data = ctx.get(self._data_key)
         if data is None:
             return dict
-        self._resolved_record = CRecord(
+        self._resolved_record = CSRecord(
             data=data,
             key_field=self._key_field,
             item_schema=self._item_schema,
@@ -276,14 +276,14 @@ class CRecordTemplate:
         return self._resolved_record.model()
 
     @property
-    def resolved_record(self) -> Optional[CRecord]:
+    def resolved_record(self) -> Optional[CSRecord]:
         return self._resolved_record
 
     def __repr__(self) -> str:
-        return f"Crecord({self._data_key!r}, {self._key_field!r}, {self._item_schema.__name__})"
+        return f"CSrecord({self._data_key!r}, {self._key_field!r}, {self._item_schema.__name__})"
 
 
-def Crecord(
+def CSrecord(
     data_key: str,
     key_field: Union[str, Callable[[Dict[str, Any]], Any]],
     item_schema: Type[BaseModel],
@@ -291,13 +291,13 @@ def Crecord(
     required: bool = True,
     flatten: bool = False,
     additional_properties: bool = False,
-) -> CRecordTemplate:
+) -> CSRecordTemplate:
     """Create a bind-time record template.
 
     ``key_field`` must be a string or callable; record data must contain mapping
     items and produce unique string property names when resolved.
     """
-    return CRecordTemplate(
+    return CSRecordTemplate(
         data_key,
         key_field,
         item_schema,
@@ -308,6 +308,4 @@ def Crecord(
     )
 
 
-c_record = Crecord
-
-__all__ = ["CRecord", "CRecordTemplate", "Crecord", "c_record"]
+__all__ = ["CSRecord", "CSRecordTemplate", "CSrecord"]

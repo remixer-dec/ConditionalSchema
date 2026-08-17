@@ -39,7 +39,7 @@ import schema as _schema
 import templates as _templates
 
 AnyOf = _conditions.AnyOf
-CYesNo = _conditions.CYesNo
+CSYesNo = _conditions.CSYesNo
 FALSY = _conditions.FALSY
 NoneOf = _conditions.NoneOf
 TRUTHY = _conditions.TRUTHY
@@ -48,9 +48,9 @@ _MISSING = _conditions._MISSING
 any_of = _conditions.any_of
 none_of = _conditions.none_of
 truthy = _conditions.truthy
-CRecord = _records.CRecord
-CRecordTemplate = _records.CRecordTemplate
-Crecord = _records.Crecord
+CSRecord = _records.CSRecord
+CSRecordTemplate = _records.CSRecordTemplate
+CSrecord = _records.CSrecord
 _build_compact_schema = _schema._build_compact_schema
 _build_conditional_schema = _schema._build_conditional_schema
 _cache_schema_result = _schema._cache_schema_result
@@ -63,8 +63,8 @@ _replace_schema_refs = _schema._replace_schema_refs
 _schema_fingerprint = _schema._schema_fingerprint
 _schema_property_name = _schema._schema_property_name
 _strip_descriptions = _schema._strip_descriptions
-Ctemplate = _templates.Ctemplate
-Cliteral = _templates.Cliteral
+CStemplate = _templates.CStemplate
+CSliteral = _templates.CSliteral
 LiteralTemplate = _templates.LiteralTemplate
 Template = _templates.Template
 _has_implicit_literal_template = _templates._has_implicit_literal_template
@@ -114,7 +114,7 @@ class ConditionalFieldInfo:
 
     def __init__(
         self,
-        field_type: Union[Type[Any], LiteralTemplate, CRecordTemplate, None] = None,
+        field_type: Union[Type[Any], LiteralTemplate, CSRecordTemplate, None] = None,
         when: Optional[Dict[str, Any]] = None,
         when_any: Optional[List[Dict[str, Any]]] = None,
         when_bound: Optional[Union[Dict[str, Any], List[str]]] = None,
@@ -265,7 +265,7 @@ class ConditionalFieldInfo:
             or self.when_unbound
             or self.when_bound
             or isinstance(self.field_type, LiteralTemplate)
-            or isinstance(self.field_type, CRecordTemplate)
+            or isinstance(self.field_type, CSRecordTemplate)
             or isinstance(self.pattern, Template)
             or isinstance(self.enum, Template)
             or isinstance(self.description, Template)
@@ -290,8 +290,8 @@ class ConditionalFieldInfo:
         if isinstance(self.field_type, LiteralTemplate):
             # Resolve LiteralTemplate to actual Literal type
             resolved_type = self.field_type.resolve(ctx)
-        elif isinstance(self.field_type, CRecordTemplate):
-            # Resolve CRecordTemplate to a dynamically generated model
+        elif isinstance(self.field_type, CSRecordTemplate):
+            # Resolve CSRecordTemplate to a dynamically generated model
             resolved_type = self.field_type.resolve(ctx)
         elif get_origin(self.field_type) is Literal:
             # Resolve string templates in Literal args
@@ -396,8 +396,8 @@ def _bind_context_cache_key(
 
 
 @overload
-def CField(
-    field_type: Union[Type[Any], LiteralTemplate, CRecordTemplate, None],
+def CSField(
+    field_type: Union[Type[Any], LiteralTemplate, CSRecordTemplate, None],
     *,
     when: Optional[Dict[str, Any]] = None,
     when_any: Optional[List[Dict[str, Any]]] = None,
@@ -415,7 +415,7 @@ def CField(
 
 
 @overload
-def CField(
+def CSField(
     *,
     when: Optional[Dict[str, Any]] = None,
     when_any: Optional[List[Dict[str, Any]]] = None,
@@ -432,8 +432,8 @@ def CField(
 ) -> Any: ...
 
 
-def CField(
-    field_type: Union[Type[Any], LiteralTemplate, CRecordTemplate, None] = None,
+def CSField(
+    field_type: Union[Type[Any], LiteralTemplate, CSRecordTemplate, None] = None,
     *,
     when: Optional[Dict[str, Any]] = None,
     when_any: Optional[List[Dict[str, Any]]] = None,
@@ -451,7 +451,7 @@ def CField(
     """Declare a conditional Pydantic field.
 
     Args:
-        field_type: Type, ``LiteralTemplate``, ``CRecordTemplate``, or ``None``
+        field_type: Type, ``LiteralTemplate``, ``CSRecordTemplate``, or ``None``
             to infer the type from the annotation.
         when: Runtime field-name conditions; every entry must match.
         when_any: Runtime field-name condition sets; at least one must match.
@@ -461,8 +461,8 @@ def CField(
         when_unbound: Context keys that must be absent.
         default: Value used when the field is active.
         alias: Schema property alias; conditions always use field names.
-        description: Static or explicit ``Ctemplate`` description.
-        pattern: Static or explicit ``Ctemplate`` regex pattern.
+        description: Static or explicit ``CStemplate`` description.
+        pattern: Static or explicit ``CStemplate`` regex pattern.
         enum: Values enforced as a Literal and emitted in the schema.
         **field_kwargs: Additional Pydantic ``Field`` arguments.
 
@@ -1144,7 +1144,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
         if cls.__needs_bind__:
             raise ValueError(
                 "Schema has bind-time conditions (when_bound, when_truthy, "
-                "when_falsy, when_unbound, templates, or Cliteral). "
+                "when_falsy, when_unbound, templates, or CSliteral). "
                 "Call .bind() first to resolve them."
             )
 
@@ -1206,7 +1206,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
             return
         visited.add(marker)
 
-        if isinstance(field_type, CRecordTemplate):
+        if isinstance(field_type, CSRecordTemplate):
             models.add(field_type.item_schema)
             return
         if isinstance(field_type, type) and issubclass(field_type, BaseModel):
@@ -1364,7 +1364,7 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
             # Collect nested models
             for model in cls._extract_nested_models(field_type):
                 nested_models.setdefault(model, []).append(prop_name)
-                if isinstance(field_type, CRecordTemplate) or (
+                if isinstance(field_type, CSRecordTemplate) or (
                     isinstance(field_type, type)
                     and issubclass(field_type, BaseModel)
                     and getattr(field_type, _DYNAMIC_RECORD_MARKER, False)
@@ -1526,22 +1526,22 @@ class ConditionalModel(BaseModel, metaclass=ConditionalModelMeta):
 
 
 __all__ = [
-    "CYesNo",
+    "CSYesNo",
     "any_of",
     "none_of",
     "truthy",
     "TRUTHY",
     "FALSY",
     "UNBOUND",
-    "Ctemplate",
-    "Cliteral",
-    "Crecord",
-    "CField",
+    "CStemplate",
+    "CSliteral",
+    "CSrecord",
+    "CSField",
     "ConditionalModel",
     "Template",
     "LiteralTemplate",
-    "CRecord",
-    "CRecordTemplate",
+    "CSRecord",
+    "CSRecordTemplate",
     "AnyOf",
     "NoneOf",
     "ConditionalFieldInfo",

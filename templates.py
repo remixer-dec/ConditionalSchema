@@ -50,7 +50,7 @@ class Template:
         return f"Template({self.value!r})"
 
 
-def Ctemplate(value: Union[str, Callable[[Dict], Any]]) -> Template:
+def CStemplate(value: Union[str, Callable[[Dict], Any]]) -> Template:
     """Create an explicit bind-time template from a string or callable."""
     return Template(value)
 
@@ -96,7 +96,7 @@ class LiteralTemplate:
             condition_result = self.condition(value)
             options = self.if_true if condition_result else self.if_false
             if options is None:
-                raise ValueError(f"Cliteral condition returned {condition_result}, but corresponding options list is None")
+                raise ValueError(f"CSliteral condition returned {condition_result}, but corresponding options list is None")
         else:
             options = self.mapping.get(value, self.default)
             if options is None:
@@ -115,16 +115,16 @@ class LiteralTemplate:
 
     def __repr__(self) -> str:
         if self.condition is not None:
-            return f"Cliteral({self.key!r}, <condition>, if_true={self.if_true!r}, if_false={self.if_false!r})"
-        return f"Cliteral({self.key!r}, {self.mapping!r})"
+            return f"CSliteral({self.key!r}, <condition>, if_true={self.if_true!r}, if_false={self.if_false!r})"
+        return f"CSliteral({self.key!r}, {self.mapping!r})"
 
 
 @overload
-def Cliteral(key: str, mapping: Dict[Any, List[Any]], default: Optional[List[Any]] = None) -> LiteralTemplate: ...
+def CSliteral(key: str, mapping: Dict[Any, List[Any]], default: Optional[List[Any]] = None) -> LiteralTemplate: ...
 
 
 @overload
-def Cliteral(
+def CSliteral(
     key: str,
     condition: Callable[[Any], bool],
     if_true: List[Any],
@@ -132,7 +132,7 @@ def Cliteral(
 ) -> LiteralTemplate: ...
 
 
-def Cliteral(
+def CSliteral(
     key: str,
     mapping_or_condition: Union[Dict[Any, List[Any]], Callable[[Any], bool]],
     default_or_if_true: Optional[List[Any]] = None,
@@ -145,7 +145,4 @@ def Cliteral(
     return LiteralTemplate(key, mapping_or_condition, actual_if_true, if_false)
 
 
-c_template = Ctemplate
-c_literal = Cliteral
-
-__all__ = ["Template", "LiteralTemplate", "Ctemplate", "Cliteral", "c_template", "c_literal"]
+__all__ = ["Template", "LiteralTemplate", "CStemplate", "CSliteral"]

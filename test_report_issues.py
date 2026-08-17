@@ -5,17 +5,15 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, computed_field, field_validator
 
 from main import (
-    CField,
-    CRecord,
+    CSField,
+    CSRecord,
+    CSRecordTemplate,
+    CSYesNo,
     ConditionalFieldInfo,
     ConditionalModel,
-    Ctemplate,
-    Cliteral,
-    Crecord,
-    c_field,
-    c_literal,
-    c_record,
-    c_template,
+    CStemplate,
+    CSliteral,
+    CSrecord,
     LiteralTemplate,
     FALSY,
     TRUTHY,
@@ -36,7 +34,7 @@ def test_bare_required_fields_are_in_variants():
     class Form(ConditionalModel):
         mode: Literal["ready"]
         action: str
-        detail: str = CField(when={"mode": "ready"})
+        detail: str = CSField(when={"mode": "ready"})
 
     variant = Form._get_variants()[0]
 
@@ -48,7 +46,7 @@ def test_variants_forbid_inactive_properties():
     class Form(ConditionalModel):
         mode: Literal["a", "b"]
         common: str
-        only_a: str = CField(when={"mode": "a"})
+        only_a: str = CSField(when={"mode": "a"})
 
     schemas = Form.json_schema()["anyOf"]
     assert all(schema["additionalProperties"] is False for schema in schemas)
@@ -62,7 +60,7 @@ def test_variants_forbid_inactive_properties():
 def test_controller_domains_are_finite_and_complete():
     class Form(ConditionalModel):
         mode: Literal["new", "edit", "other"]
-        detail: str = CField(
+        detail: str = CSField(
             when_any=[{"mode": any_of("new")}, {"mode": none_of("edit")}],
         )
 
@@ -77,14 +75,14 @@ def test_controller_domains_are_finite_and_complete():
 
         class Unbounded(ConditionalModel):
             mode: str
-            detail: str = CField(when={"mode": "edit"})
+            detail: str = CSField(when={"mode": "edit"})
 
 
 def test_bind_context_does_not_freeze_unrelated_fields():
     class Form(ConditionalModel):
         mode: Literal["a"]
         name: str
-        detail: str = CField(when={"mode": "a"})
+        detail: str = CSField(when={"mode": "a"})
 
     bound = Form.bind(name="Alice")
     name_schema = bound.json_schema()["properties"]["name"]
@@ -130,7 +128,7 @@ def test_inherited_behavior_and_configuration_are_preserved():
 def test_direct_validation_matches_the_selected_variant():
     class Form(ConditionalModel):
         mode: Literal["a", "b"]
-        only_a: str = CField(when={"mode": "a"})
+        only_a: str = CSField(when={"mode": "a"})
 
     assert Form.model_validate({"mode": "b"}).mode == "b"
     with pytest.raises(ValidationError):
@@ -142,7 +140,7 @@ def test_direct_validation_matches_the_selected_variant():
 def test_standard_pydantic_methods_use_the_conditional_shape():
     class Form(ConditionalModel):
         mode: Literal["a", "b"]
-        only_a: str | None = CField(when={"mode": "a"})
+        only_a: str | None = CSField(when={"mode": "a"})
 
     value = Form.model_validate({"mode": "b"})
     assert value.model_dump() == {"mode": "b"}
@@ -156,7 +154,7 @@ def test_standard_pydantic_methods_use_the_conditional_shape():
 def test_controller_defaults_are_only_kept_on_matching_variants():
     class Form(ConditionalModel):
         mode: Literal["a", "b"] = "a"
-        detail: str = CField(when={"mode": "b"})
+        detail: str = CSField(when={"mode": "b"})
 
     variants = Form._get_variants()
     matching = next(variant for variant in variants if variant.model_fields["mode"].annotation == Literal["a"])
@@ -169,7 +167,7 @@ def test_controller_defaults_are_only_kept_on_matching_variants():
 def test_binding_does_not_freeze_runtime_controller_values():
     class Form(ConditionalModel):
         mode: Literal["a", "b"]
-        detail: str = CField(when={"mode": "a"})
+        detail: str = CSField(when={"mode": "a"})
 
     bound = Form.bind(mode="a")
 
@@ -180,7 +178,7 @@ def test_binding_does_not_freeze_runtime_controller_values():
 def test_dynamic_aliases_are_installed_when_binding():
     class Form(ConditionalModel):
         mode: Literal["a"]
-        detail: str = CField(alias=Ctemplate("{mode}_detail"), when={"mode": "a"})
+        detail: str = CSField(alias=CStemplate("{mode}_detail"), when={"mode": "a"})
 
     bound = Form.bind(mode="a")
 
@@ -190,8 +188,8 @@ def test_dynamic_aliases_are_installed_when_binding():
 
 def test_conditional_enum_domains_can_drive_variants():
     class Form(ConditionalModel):
-        mode: str = CField(enum=["a", "b"])
-        detail: str = CField(when={"mode": "a"})
+        mode: str = CSField(enum=["a", "b"])
+        detail: str = CSField(when={"mode": "a"})
 
     assert [variant.model_fields["mode"].annotation for variant in Form._get_variants()]
     assert len(Form._get_variants()) == 2
@@ -199,8 +197,8 @@ def test_conditional_enum_domains_can_drive_variants():
 
 def test_bound_cliteral_domains_can_drive_runtime_conditions():
     class Form(ConditionalModel):
-        mode: str = CField(Cliteral("state", {"ready": ["a", "b"]}))
-        detail: str = CField(when={"mode": "a"})
+        mode: str = CSField(CSliteral("state", {"ready": ["a", "b"]}))
+        detail: str = CSField(when={"mode": "a"})
 
     bound = Form.bind(state="ready")
 
@@ -228,7 +226,7 @@ def test_class_names_and_private_attributes_do_not_change_processing():
 
 def test_enum_enforces_values_and_preserves_schema_extras():
     class Form(ConditionalModel):
-        value: str = CField(enum=["a", "b"], json_schema_extra={"x-note": "keep"})
+        value: str = CSField(enum=["a", "b"], json_schema_extra={"x-note": "keep"})
 
     schema = Form.json_schema()
     assert schema["properties"]["value"]["enum"] == ["a", "b"]
@@ -240,8 +238,8 @@ def test_enum_enforces_values_and_preserves_schema_extras():
 
 def test_description_stripping_preserves_description_property_names():
     class Form(ConditionalModel):
-        description: str = CField(description="property description")
-        value: str = CField(description="field description")
+        description: str = CSField(description="property description")
+        value: str = CSField(description="field description")
 
     schema = Form.json_schema(descriptions=False)
     assert "description" in schema["properties"]
@@ -271,7 +269,7 @@ def test_description_stripping_reuses_unchanged_schema_containers():
 def test_literal_braces_and_regex_quantifiers_are_not_implicit_templates():
     class Form(ConditionalModel):
         include: bool
-        text: str = CField(
+        text: str = CSField(
             description='Example JSON: {"key": 1}',
             pattern=r"^[A-Z]{2}$",
             when_truthy=["include"],
@@ -287,13 +285,13 @@ def test_unknown_and_cyclic_dependencies_are_rejected():
 
         class UnknownDependency(ConditionalModel):
             mode: Literal["ready"]
-            detail: str = CField(when={"missing": "value"})
+            detail: str = CSField(when={"missing": "value"})
 
     with pytest.raises(ValueError, match="cyclic conditional dependency"):
 
         class CyclicDependency(ConditionalModel):
-            first: Literal["yes"] = CField(when={"second": "yes"})
-            second: Literal["yes"] = CField(when={"first": "yes"})
+            first: Literal["yes"] = CSField(when={"second": "yes"})
+            second: Literal["yes"] = CSField(when={"first": "yes"})
 
 
 def test_controller_field_info_is_preserved_in_variants():
@@ -304,7 +302,7 @@ def test_controller_field_info_is_preserved_in_variants():
             description="Current state",
             json_schema_extra={"x-source": "input"},
         )
-        detail: str = CField(when={"mode": "a"})
+        detail: str = CSField(when={"mode": "a"})
 
     variant = Form._get_variants()[0]
     schema = variant.model_json_schema(by_alias=True)
@@ -315,11 +313,11 @@ def test_controller_field_info_is_preserved_in_variants():
 
 
 def test_public_record_annotations_match_runtime_values():
-    from main import CRecord
+    from main import CSRecord
 
-    hints = get_type_hints(CRecord._get_lookup_key)
+    hints = get_type_hints(CSRecord._get_lookup_key)
     assert set(get_args(hints["return"])) == {str, type(None)}
-    assert get_type_hints(CRecord._extract_key)["return"] is Any
+    assert get_type_hints(CSRecord._extract_key)["return"] is Any
 
 
 def test_combinations_are_streamed():
@@ -332,7 +330,7 @@ def test_combinations_are_streamed():
 def test_variant_names_are_typed_and_deterministic():
     class Form(ConditionalModel):
         mode: Literal[1, "1"]
-        detail: str = CField(when={"mode": any_of(1, "1")})
+        detail: str = CSField(when={"mode": any_of(1, "1")})
 
     variants = Form._get_variants()
     names = [variant.__name__ for variant in variants]
@@ -344,7 +342,7 @@ def test_variant_names_are_typed_and_deterministic():
 def test_large_controller_sets_use_a_non_cartesian_schema():
     annotations = {f"mode_{index}": bool for index in range(9)}
     annotations.update({f"detail_{index}": str for index in range(9)})
-    fields = {f"detail_{index}": CField(when={f"mode_{index}": True}) for index in range(9)}
+    fields = {f"detail_{index}": CSField(when={f"mode_{index}": True}) for index in range(9)}
     WideForm = type("WideForm", (ConditionalModel,), {"__annotations__": annotations, **fields})
 
     assert WideForm.__dict__["__variants__"] is None
@@ -365,9 +363,9 @@ def test_conditional_dependencies_are_evaluated_in_topological_order(monkeypatch
 
     class Form(ConditionalModel):
         mode: Literal["on"]
-        leaf: str = CField(when={"middle": "on"})
-        middle: Literal["on"] = CField(when={"root": "on"})
-        root: Literal["on"] = CField(when={"mode": "on"})
+        leaf: str = CSField(when={"middle": "on"})
+        middle: Literal["on"] = CSField(when={"root": "on"})
+        root: Literal["on"] = CSField(when={"mode": "on"})
 
     original_evaluate = ConditionalFieldInfo.evaluate
 
@@ -388,7 +386,7 @@ def test_conditional_dependencies_are_evaluated_in_topological_order(monkeypatch
 def test_condition_index_reuses_controller_domains():
     class Form(ConditionalModel):
         mode: Literal["a", "b"]
-        detail: str = CField(when={"mode": any_of("a", "b")})
+        detail: str = CSField(when={"mode": any_of("a", "b")})
 
     index = Form.__dict__["__condition_index__"]
 
@@ -399,7 +397,7 @@ def test_condition_index_reuses_controller_domains():
 
 def test_bind_reuses_models_for_hashable_contexts():
     class Form(ConditionalModel):
-        detail: str = CField(when_truthy=["show"])
+        detail: str = CSField(when_truthy=["show"])
 
     first = Form.bind(show=True)
     second = Form.bind(show=True)
@@ -412,7 +410,7 @@ def test_bind_reuses_models_for_hashable_contexts():
 def test_variant_identity_uses_typed_controller_values():
     class Form(ConditionalModel):
         mode: Literal[1, "1"]
-        detail: str = CField(when={"mode": any_of(1, "1")})
+        detail: str = CSField(when={"mode": any_of(1, "1")})
 
     variants = Form._get_variants()
 
@@ -431,9 +429,9 @@ def test_any_of_and_none_of_support_unhashable_values():
 
 def test_bind_conditions_distinguish_missing_none_and_falsy_values():
     class Form(ConditionalModel):
-        unbound: str = CField(when_unbound=["flag"])
-        falsy: str = CField(when_falsy=["flag"])
-        explicit_none: str = CField(when_bound={"flag": None})
+        unbound: str = CSField(when_unbound=["flag"])
+        falsy: str = CSField(when_falsy=["flag"])
+        explicit_none: str = CSField(when_bound={"flag": None})
 
     absent = Form.bind()
     none_value = Form.bind(flag=None)
@@ -451,9 +449,9 @@ def test_cliteral_condition_is_called_once_when_options_are_missing():
         calls.append(value)
         return True
 
-    from main import Cliteral
+    from main import CSliteral
 
-    literal = Cliteral("mode", condition, if_true=None, if_false=["fallback"])
+    literal = CSliteral("mode", condition, if_true=None, if_false=["fallback"])
     with pytest.raises(ValueError, match="corresponding options list"):
         literal.resolve({"mode": "value"})
 
@@ -466,7 +464,7 @@ def test_crecord_freezes_input_and_defends_data_map():
         value: int
 
     source = [{"key": "one", "value": 1}]
-    record = CRecord(source, "key", Item)
+    record = CSRecord(source, "key", Item)
     source[0]["key"] = "changed"
     source[0]["value"] = 2
 
@@ -482,7 +480,7 @@ def test_crecord_flatten_preserves_alias_schema_and_constraints():
     class Item(BaseModel):
         value: int = Field(alias="itemValue", ge=1, le=10)
 
-    record = CRecord(
+    record = CSRecord(
         [{"name": "one"}],
         lambda item: item["name"],
         Item,
@@ -490,8 +488,8 @@ def test_crecord_flatten_preserves_alias_schema_and_constraints():
     )
 
     schema = record.json_schema(by_alias=True)
-    item_schema = schema["$defs"]["CRecordItem"]
-    assert schema["properties"]["one"] == {"$ref": "#/$defs/CRecordItem"}
+    item_schema = schema["$defs"]["CSRecordItem"]
+    assert schema["properties"]["one"] == {"$ref": "#/$defs/CSRecordItem"}
     assert item_schema["minimum"] == 1
     assert item_schema["maximum"] == 10
 
@@ -509,7 +507,7 @@ def test_crecord_hoists_nested_defs_and_matches_extra_policy():
     class Item(BaseModel):
         nested: Nested
 
-    strict = CRecord(
+    strict = CSRecord(
         {
             "one": {"nested": {"label": "x"}},
             "two": {"nested": {"label": "y"}},
@@ -520,13 +518,13 @@ def test_crecord_hoists_nested_defs_and_matches_extra_policy():
     schema = strict.json_schema()
 
     assert "$defs" in schema
-    assert "$defs" not in schema["$defs"]["CRecordItem"]
+    assert "$defs" not in schema["$defs"]["CSRecordItem"]
     assert "Nested" in schema["$defs"]
     assert schema["properties"]["one"] is not schema["properties"]["two"]
     with pytest.raises(ValidationError):
         strict.model().model_validate({"one": {"nested": {"label": "x"}}, "extra": {}})
 
-    permissive = CRecord(
+    permissive = CSRecord(
         {"one": {"nested": {"label": "x"}}},
         "ignored",
         Item,
@@ -545,7 +543,7 @@ def test_dynamic_record_marker_does_not_use_class_name_heuristics():
     class Item(BaseModel):
         value: int
 
-    record_model = CRecord({"one": {"value": 1}}, "ignored", Item).model()
+    record_model = CSRecord({"one": {"value": 1}}, "ignored", Item).model()
     assert getattr(record_model, "__conditional_dynamic_record__") is True
     assert ConditionalModel._extract_nested_models(record_model) == {Item}
 
@@ -652,7 +650,7 @@ def test_schema_and_propdoc_caches_are_owned_by_each_class():
 def test_propdoc_lazy_controls_bound_field_filtering():
     class Form(ConditionalModel):
         show: bool
-        detail: str = CField(when_truthy=["show"])
+        detail: str = CSField(when_truthy=["show"])
 
     assert "detail" in Form.propdoc(lazy=True)
     with pytest.raises(ValueError, match="requires a bound model"):
@@ -668,7 +666,7 @@ def test_propdoc_lazy_controls_bound_field_filtering():
 def test_propdoc_builds_alias_map_once(monkeypatch):
     class Form(ConditionalModel):
         mode: Literal["a"] = Field(alias="state")
-        detail: str = CField(alias="details", when={"mode": "a"})
+        detail: str = CSField(alias="details", when={"mode": "a"})
 
     calls = []
     original = Form._build_alias_map.__func__
@@ -720,28 +718,65 @@ def test_nested_model_extraction_reuses_cached_accumulator_result(monkeypatch):
 
 def test_snake_case_factories_and_focused_modules_preserve_api():
     from conditions import AnyOf as ModuleAnyOf
-    from records import CRecord as ModuleCRecord
+    from records import CSRecord as ModuleCRecord
     from templates import Template as ModuleTemplate
 
-    assert c_template is Ctemplate
-    assert c_literal is Cliteral
-    assert c_record is Crecord
     assert ModuleAnyOf is any_of("x").__class__
-    assert ModuleCRecord is CRecord
-    assert ModuleTemplate is c_template("{value}").__class__
+    assert ModuleCRecord is CSRecord
+    assert ModuleTemplate is CStemplate("{value}").__class__
 
     class Form(ConditionalModel):
         mode: Literal["ready"]
-        detail: str = c_field(when={"mode": "ready"})
+        detail: str = CSField(when={"mode": "ready"})
 
     assert "detail" in Form.json_schema()["properties"]
 
 
+def test_legacy_names_are_available_from_compat():
+    from compat import (
+        CField,
+        CRecord,
+        CRecordTemplate,
+        CYesNo,
+        Cliteral,
+        Crecord,
+        Ctemplate,
+        c_field,
+        c_literal,
+        c_record,
+        c_template,
+    )
+
+    assert CField is CSField
+    assert CRecord is CSRecord
+    assert CRecordTemplate is CSRecordTemplate
+    assert CYesNo is CSYesNo
+    assert Cliteral is CSliteral
+    assert Crecord is CSrecord
+    assert Ctemplate is CStemplate
+    assert c_field is CSField
+    assert c_literal is CSliteral
+    assert c_record is CSrecord
+    assert c_template is CStemplate
+
+
+def test_snake_case_factories_are_not_primary_exports():
+    import main
+    import records
+    import templates
+
+    for module in (main, records, templates):
+        assert not hasattr(module, "c_template")
+        assert not hasattr(module, "c_literal")
+        assert not hasattr(module, "c_record")
+        assert not hasattr(module, "c_field")
+
+
 def test_condition_sentinels_use_the_shared_presence_evaluator():
     class Form(ConditionalModel):
-        truthy_field: str = CField(when_bound={"flag": TRUTHY})
-        falsy_field: str = CField(when_bound={"flag": FALSY})
-        unbound_field: str = CField(when_bound={"flag": UNBOUND})
+        truthy_field: str = CSField(when_bound={"flag": TRUTHY})
+        falsy_field: str = CSField(when_bound={"flag": FALSY})
+        unbound_field: str = CSField(when_bound={"flag": UNBOUND})
 
     absent_fields = set(Form.bind()._get_variants()[0].model_fields)
     true_fields = set(Form.bind(flag=True)._get_variants()[0].model_fields)
@@ -758,7 +793,7 @@ def test_runtime_conditions_require_canonical_field_names():
 
         class AliasCondition(ConditionalModel):
             mode: Literal["a"] = Field(alias="state")
-            detail: str = CField(when={"state": "a"})
+            detail: str = CSField(when={"state": "a"})
 
     with pytest.raises(ValueError, match="ambiguous alias"):
 
@@ -774,20 +809,20 @@ def test_crecord_rejects_malformed_and_duplicate_keys():
         name: str
 
     with pytest.raises(TypeError, match="each item must be a dictionary"):
-        CRecord(data=["bad"], key_field="name", item_schema=Item)
+        CSRecord(data=["bad"], key_field="name", item_schema=Item)
 
     with pytest.raises(TypeError, match="values must be dictionaries"):
-        CRecord(data={"one": "bad"}, key_field="name", item_schema=Item)
+        CSRecord(data={"one": "bad"}, key_field="name", item_schema=Item)
 
     with pytest.raises(ValueError, match="missing key"):
-        CRecord(data=[{}], key_field="name", item_schema=Item).keys
+        CSRecord(data=[{}], key_field="name", item_schema=Item).keys
 
     with pytest.raises(ValueError, match="duplicate key"):
-        CRecord(
+        CSRecord(
             data=[{"name": "one"}, {"name": "one"}],
             key_field="name",
             item_schema=Item,
         ).keys
 
     with pytest.raises(ValueError, match="must be a string"):
-        CRecord(data=[{"name": "one"}], key_field=lambda item: [item["name"], "key"], item_schema=Item).keys
+        CSRecord(data=[{"name": "one"}], key_field=lambda item: [item["name"], "key"], item_schema=Item).keys
