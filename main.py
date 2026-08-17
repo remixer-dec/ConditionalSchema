@@ -1,8 +1,4 @@
-"""Public API for Conditional Schema.
-
-Implementation details live in focused modules. Existing applications can
-import the public names from ``main``.
-"""
+"""Public API for Conditional Schema library."""
 
 import model as _model
 
