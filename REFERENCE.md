@@ -36,7 +36,7 @@ focused modules also re-export names for their subsystem.
 | `when_unbound` | `List[str]` | Context keys that must NOT be present |
 | `default` | `Any` | Default value |
 | `alias` | `str` | JSON alias (used with `by_alias=True`) |
-| `description` | `str \| Template` | Field description |
+| `description` | `str \| Template` | Field description (may contain `{placeholder}` templates resolved at bind time) |
 | `pattern` | `str \| Template` | Regex pattern |
 | `enum` | `List \| Template` | Allowed values. Validation enforces them, and the schema includes them. |
 | `**field_kwargs` | `Field` arguments | Additional Pydantic field metadata and constraints |
@@ -216,6 +216,17 @@ schema = BoundForm.json_schema()
 | `required` | `bool` | Make all properties required (default: True) |
 | `flatten` | `bool` | For a one-field item model, use that field's schema directly for each record value (default: False) |
 | `additional_properties` | `bool` | Allow additional properties (default: False) |
+
+**Flatten mode** - when `item_schema` has exactly one field, property values use that field's type directly instead of a nested object:
+
+```python
+class Score(BaseModel):
+    value: int
+
+record = CRecord(data=scores, key_field="name", item_schema=Score, flatten=True)
+# {"type": "object", "properties": {"alice": {"type": "integer"}, ...}}
+# Instead of: {"properties": {"alice": {"type": "object", "properties": {"value": ...}}}}
+```
 
 **Key extraction modes:**
 ```python
